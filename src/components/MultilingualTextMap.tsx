@@ -17,6 +17,7 @@ import {
   parseTranslationCsv,
   parseTranslationHtml,
   parseTranslationXlsx,
+  searchTranslationCandidates,
   searchTranslationItems,
 } from "@/lib/translation-parser";
 import {
@@ -29,11 +30,36 @@ import { saveSupabaseSnapshot, uploadScreenImage } from "@/lib/supabase-storage"
 
 type ImageRect = Pick<TextRegion, "x" | "y" | "width" | "height">;
 type AppMode = "view" | "add" | "edit";
+type MoveAxis = "x" | "y";
+type ResizeEdges = { top: boolean; right: boolean; bottom: boolean; left: boolean };
 
 type Interaction =
-  | { mode: "draw"; startX: number; startY: number }
-  | { mode: "move"; regionId: string; startX: number; startY: number; initial: ImageRect }
-  | { mode: "resize"; regionId: string; startX: number; startY: number; initial: ImageRect };
+  | { mode: "draw"; startX: number; startY: number; beforeRegions: TextRegion[] }
+  | {
+      mode: "move";
+      regionId: string;
+      startX: number;
+      startY: number;
+      initial: ImageRect;
+      beforeRegions: TextRegion[];
+      duplicatedRegion?: TextRegion;
+      constrainAxis?: boolean;
+    }
+  | {
+      mode: "resize";
+      regionId: string;
+      startX: number;
+      startY: number;
+      initial: ImageRect;
+      beforeRegions: TextRegion[];
+      edges: ResizeEdges;
+    };
+
+type RegionHistory = {
+  scope: string;
+  undo: TextRegion[][];
+  redo: TextRegion[][];
+};
 
 type ScreenForm = {
   name: string;
@@ -77,6 +103,12 @@ type DeleteTarget =
   | { type: "group"; name: string }
   | { type: "screen"; screenId: string; name: string };
 
+type RegionOcrState = {
+  status: "idle" | "running" | "success" | "failed";
+  confidence?: number;
+  error?: string;
+};
+
 const DRAFT_SCREEN_ID = "__draft_screen__";
 
 const defaultScreenForm: ScreenForm = {
@@ -103,6 +135,36 @@ function getNormalizedRect(startX: number, startY: number, x: number, y: number)
     width: Math.abs(x - startX),
     height: Math.abs(y - startY),
   };
+}
+
+function getMovedRect(
+  initial: ImageRect,
+  startX: number,
+  startY: number,
+  x: number,
+  y: number,
+  imageWidth: number,
+  imageHeight: number,
+  moveAxis?: MoveAxis,
+): ImageRect {
+  let deltaX = x - startX;
+  let deltaY = y - startY;
+
+  if (moveAxis === "x") deltaY = 0;
+  if (moveAxis === "y") deltaX = 0;
+
+  return {
+    ...initial,
+    x: clamp(initial.x + deltaX, 0, imageWidth - initial.width),
+    y: clamp(initial.y + deltaY, 0, imageHeight - initial.height),
+  };
+}
+
+function cloneRegions(regions: TextRegion[]) {
+  return regions.map((region) => ({
+    ...region,
+    translationOverrides: region.translationOverrides ? { ...region.translationOverrides } : undefined,
+  }));
 }
 
 function readFileAsText(file: File) {
@@ -132,6 +194,16 @@ function readFileAsArrayBuffer(file: File) {
   });
 }
 
+function loadImageElement(src: string) {
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image();
+    image.crossOrigin = "anonymous";
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("OCR용 이미지를 읽을 수 없습니다."));
+    image.src = src;
+  });
+}
+
 function loadImageSize(dataUrl: string) {
   return new Promise<{ width: number; height: number }>((resolve, reject) => {
     const image = new Image();
@@ -139,6 +211,39 @@ function loadImageSize(dataUrl: string) {
     image.onerror = () => reject(new Error("이미지 크기를 읽을 수 없습니다."));
     image.src = dataUrl;
   });
+}
+
+async function cropImageRegion(imageTarget: ImageTarget, region: ImageRect) {
+  const image = await loadImageElement(imageTarget.imageUrl);
+  const scale = 2;
+  const sourceX = Math.max(0, Math.round(region.x));
+  const sourceY = Math.max(0, Math.round(region.y));
+  const sourceWidth = Math.max(1, Math.min(Math.round(region.width), imageTarget.imageWidth - sourceX));
+  const sourceHeight = Math.max(1, Math.min(Math.round(region.height), imageTarget.imageHeight - sourceY));
+  const canvas = document.createElement("canvas");
+  canvas.width = sourceWidth * scale;
+  canvas.height = sourceHeight * scale;
+
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("OCR crop 캔버스를 생성할 수 없습니다.");
+
+  context.fillStyle = "#ffffff";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = "high";
+  context.drawImage(
+    image,
+    sourceX,
+    sourceY,
+    sourceWidth,
+    sourceHeight,
+    0,
+    0,
+    canvas.width,
+    canvas.height,
+  );
+
+  return canvas.toDataURL("image/png");
 }
 
 function screenToForm(screen: Screen): ScreenForm {
@@ -208,6 +313,14 @@ function ClearFieldIcon() {
   );
 }
 
+function SelectChevronIcon() {
+  return (
+    <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+      <path d="M5 7.5L10 12.5L15 7.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 export function MultilingualTextMap() {
   const [appState, setAppState] = useState<AppState>(getInitialAppState);
   const [translations, setTranslations] = useState<TranslationItem[]>([]);
@@ -225,7 +338,6 @@ export function MultilingualTextMap() {
   const [translationQuery, setTranslationQuery] = useState("");
   const [viewSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | TextRegionStatus>("all");
-  const [imageZoom, setImageZoom] = useState(100);
   const [draftRect, setDraftRect] = useState<ImageRect | null>(null);
   const [interaction, setInteraction] = useState<Interaction | null>(null);
   const [editingCell, setEditingCell] = useState<EditingCell | null>(null);
@@ -233,13 +345,22 @@ export function MultilingualTextMap() {
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
   const [editingGroup, setEditingGroup] = useState<EditingGroup | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
+  const [regionDeleteTargetId, setRegionDeleteTargetId] = useState<string>();
+  const [addLeaveConfirmOpen, setAddLeaveConfirmOpen] = useState(false);
   const [sourceDialogOpen, setSourceDialogOpen] = useState(false);
+  const [ocrByRegion, setOcrByRegion] = useState<Record<string, RegionOcrState>>({});
 
   const overlayRef = useRef<HTMLDivElement>(null);
   const imageFileInputRef = useRef<HTMLInputElement>(null);
   const translationFileInputRef = useRef<HTMLInputElement>(null);
   const itemRefs = useRef<Record<string, HTMLElement | null>>({});
   const defaultDataLoadAttempted = useRef(false);
+  const suppressedRegionClickRef = useRef<string | undefined>(undefined);
+  const regionHistoryRef = useRef<RegionHistory>({ scope: "", undo: [], redo: [] });
+  const interactionHistoryRecordedRef = useRef(false);
+  const duplicateMoveAxisRef = useRef<MoveAxis | undefined>(undefined);
+  const addHistoryEntryActiveRef = useRef(false);
+  const allowAddHistoryPopRef = useRef(false);
 
   const translationSources = appState.sources ?? (appState.source ? [appState.source] : []);
   const enabledSourceIds = useMemo(
@@ -268,7 +389,25 @@ export function MultilingualTextMap() {
 
     return Array.from(groups.entries()).sort(([a], [b]) => a.localeCompare(b));
   }, [appState.groups, appState.screens]);
+  const groupOptions = useMemo(() => {
+    return Array.from(
+      new Set([
+        ...(appState.groups ?? []),
+        ...appState.screens.map(getScreenGroup),
+        screenForm.group,
+      ].filter(Boolean)),
+    );
+  }, [appState.groups, appState.screens, screenForm.group]);
   const isEditing = mode === "add" || mode === "edit";
+  const isAddModeDirty =
+    mode === "add" &&
+    Boolean(
+      imageDraft ||
+        draftRegions.length > 0 ||
+        screenForm.name.trim() ||
+        screenForm.memo.trim() ||
+        screenForm.figmaUrl.trim(),
+    );
   const editableImage = useMemo<ImageTarget | undefined>(() => {
     if (mode === "add" && imageDraft) {
       return {
@@ -285,6 +424,16 @@ export function MultilingualTextMap() {
   const translationsById = useMemo(() => {
     return new Map(translations.map((item) => [item.id, item]));
   }, [translations]);
+  const linkedTranslationUsage = useMemo(() => {
+    const usage = new Map<string, number>();
+
+    for (const region of [...appState.regions, ...draftRegions]) {
+      if (!region.translationItemId) continue;
+      usage.set(region.translationItemId, (usage.get(region.translationItemId) ?? 0) + 1);
+    }
+
+    return usage;
+  }, [appState.regions, draftRegions]);
 
   const regionsForScreen = useMemo(
     () => appState.regions.filter((region) => region.screenId === appState.activeScreenId),
@@ -329,23 +478,143 @@ export function MultilingualTextMap() {
   }, [activeRegions, statusFilter, translationsById, viewSearch]);
 
   const searchQuery = translationQuery || selectedRegion?.visibleText || "";
+  const searchCandidates = useMemo(
+    () => searchTranslationCandidates(searchableTranslations, searchQuery, 35),
+    [searchQuery, searchableTranslations],
+  );
   const searchResults = useMemo(
     () => searchTranslationItems(searchableTranslations, searchQuery, 35),
     [searchQuery, searchableTranslations],
   );
-
   function openKeyDialog(region: TextRegion, anchor: DialogAnchor) {
+    if (document.activeElement instanceof HTMLElement) {
+      document.activeElement.blur();
+    }
     setSelectedRegionId(region.id);
     setKeyDialogRegionId(region.id);
     setKeyDialogAnchor(anchor);
     setPendingTranslationItemId(region.translationItemId);
-    setTranslationQuery("");
+    setTranslationQuery(region.visibleText);
   }
 
   function closeKeyDialog() {
     setKeyDialogRegionId(undefined);
     setKeyDialogAnchor(undefined);
     setPendingTranslationItemId(undefined);
+    setTranslationQuery("");
+  }
+
+  function getRegionHistoryScope() {
+    return mode === "add" ? `add:${DRAFT_SCREEN_ID}` : `edit:${currentScreen?.id ?? ""}`;
+  }
+
+  function getRegionHistory() {
+    const scope = getRegionHistoryScope();
+    if (regionHistoryRef.current.scope !== scope) {
+      regionHistoryRef.current = { scope, undo: [], redo: [] };
+    }
+    return regionHistoryRef.current;
+  }
+
+  function resetRegionHistory() {
+    regionHistoryRef.current = { scope: getRegionHistoryScope(), undo: [], redo: [] };
+    interactionHistoryRecordedRef.current = false;
+  }
+
+  function recordRegionHistory(regions: TextRegion[]) {
+    const history = getRegionHistory();
+    history.undo = [...history.undo.slice(-49), cloneRegions(regions)];
+    history.redo = [];
+  }
+
+  function replaceActiveRegions(regions: TextRegion[]) {
+    const nextRegions = cloneRegions(regions);
+    if (mode === "add") {
+      setDraftRegions(nextRegions);
+      return;
+    }
+
+    const screenId = currentScreen?.id;
+    if (!screenId) return;
+
+    setAppState((state) => {
+      let inserted = false;
+      const mergedRegions = state.regions.flatMap((region) => {
+        if (region.screenId !== screenId) return [region];
+        if (inserted) return [];
+        inserted = true;
+        return nextRegions;
+      });
+
+      return {
+        ...state,
+        regions: inserted ? mergedRegions : [...mergedRegions, ...nextRegions],
+      };
+    });
+  }
+
+  function undoRegionChange() {
+    const history = getRegionHistory();
+    const previousRegions = history.undo.pop();
+    if (!previousRegions) return;
+
+    history.redo.push(cloneRegions(activeRegions));
+    replaceActiveRegions(previousRegions);
+    setSelectedRegionId(undefined);
+    setInteraction(null);
+    setDraftRect(null);
+    setEditingCell(null);
+    setRegionDeleteTargetId(undefined);
+    closeKeyDialog();
+  }
+
+  function redoRegionChange() {
+    const history = getRegionHistory();
+    const nextRegions = history.redo.pop();
+    if (!nextRegions) return;
+
+    history.undo.push(cloneRegions(activeRegions));
+    replaceActiveRegions(nextRegions);
+    setSelectedRegionId(undefined);
+    setInteraction(null);
+    setDraftRect(null);
+    setEditingCell(null);
+    setRegionDeleteTargetId(undefined);
+    closeKeyDialog();
+  }
+
+  function pushAddHistoryEntry() {
+    if (addHistoryEntryActiveRef.current) return;
+    const currentState =
+      typeof window.history.state === "object" && window.history.state !== null ? window.history.state : {};
+    window.history.pushState({ ...currentState, tgAddMode: true }, "", window.location.href);
+    addHistoryEntryActiveRef.current = true;
+  }
+
+  function consumeAddHistoryEntry() {
+    if (!addHistoryEntryActiveRef.current) return;
+    allowAddHistoryPopRef.current = true;
+    window.history.back();
+  }
+
+  function leaveAddMode() {
+    setAddLeaveConfirmOpen(false);
+    closeEditMode();
+    consumeAddHistoryEntry();
+  }
+
+  function requestLeaveAddMode() {
+    if (mode !== "add") {
+      closeEditMode();
+      return;
+    }
+
+    if (isAddModeDirty) {
+      setAddLeaveConfirmOpen(true);
+      return;
+    }
+
+    leaveAddMode();
   }
 
   useEffect(() => {
@@ -371,6 +640,35 @@ export function MultilingualTextMap() {
       active = false;
     };
   }, []);
+
+  useEffect(() => {
+    const onPopState = () => {
+      if (!addHistoryEntryActiveRef.current) return;
+
+      if (allowAddHistoryPopRef.current) {
+        allowAddHistoryPopRef.current = false;
+        addHistoryEntryActiveRef.current = false;
+        return;
+      }
+
+      if (mode !== "add") {
+        addHistoryEntryActiveRef.current = false;
+        return;
+      }
+
+      addHistoryEntryActiveRef.current = false;
+      if (isAddModeDirty) {
+        pushAddHistoryEntry();
+        setAddLeaveConfirmOpen(true);
+        return;
+      }
+
+      closeEditMode();
+    };
+
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, [isAddModeDirty, mode]);
 
   useEffect(() => {
     if (!isLoaded) return;
@@ -405,6 +703,59 @@ export function MultilingualTextMap() {
   }, [selectedRegionId]);
 
   useEffect(() => {
+    if (!isEditing || !selectedRegionId || keyDialogRegionId || regionDeleteTargetId) return;
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target;
+      const isEditingText =
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        target instanceof HTMLSelectElement ||
+        (target instanceof HTMLElement && target.isContentEditable);
+      const isDeleteKey =
+        event.key === "Backspace" ||
+        event.key === "Delete" ||
+        event.code === "Backspace" ||
+        event.code === "Delete" ||
+        event.keyCode === 8 ||
+        event.keyCode === 46;
+      if (!isDeleteKey || event.repeat || isEditingText) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+      setEditingCell(null);
+      closeKeyDialog();
+      setRegionDeleteTargetId(selectedRegionId);
+    };
+
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => document.removeEventListener("keydown", onKeyDown, true);
+  }, [isEditing, keyDialogRegionId, regionDeleteTargetId, selectedRegionId]);
+
+  useEffect(() => {
+    if (!isEditing) return;
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!event.metaKey || event.key.toLowerCase() !== "z" || event.repeat) return;
+
+      const history = getRegionHistory();
+      const canApplyHistory = event.shiftKey ? history.redo.length > 0 : history.undo.length > 0;
+      if (!canApplyHistory) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.shiftKey) {
+        redoRegionChange();
+      } else {
+        undoRegionChange();
+      }
+    };
+
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => document.removeEventListener("keydown", onKeyDown, true);
+  }, [activeRegions, currentScreen?.id, isEditing, mode]);
+
+  useEffect(() => {
     if (mode !== "edit" || !currentScreen) return;
     setScreenForm(screenToForm(currentScreen));
     setImageDraft(null);
@@ -423,6 +774,17 @@ export function MultilingualTextMap() {
       };
     };
 
+    const getDuplicateMoveAxis = (event: PointerEvent, point: { x: number; y: number }) => {
+      if (interaction.mode !== "move" || !interaction.duplicatedRegion) return undefined;
+      if (!interaction.constrainAxis && !event.shiftKey && !duplicateMoveAxisRef.current) return undefined;
+
+      if (!duplicateMoveAxisRef.current) {
+        duplicateMoveAxisRef.current =
+          Math.abs(point.x - interaction.startX) >= Math.abs(point.y - interaction.startY) ? "x" : "y";
+      }
+      return duplicateMoveAxisRef.current;
+    };
+
     const onPointerMove = (event: PointerEvent) => {
       const point = toImagePoint(event);
       if (!point) return;
@@ -432,36 +794,54 @@ export function MultilingualTextMap() {
         return;
       }
 
+      if (
+        !interactionHistoryRecordedRef.current &&
+        (Math.abs(point.x - interaction.startX) > 0.01 || Math.abs(point.y - interaction.startY) > 0.01)
+      ) {
+        recordRegionHistory(interaction.beforeRegions);
+        interactionHistoryRecordedRef.current = true;
+      }
+
       const updateRegion = (region: TextRegion) => {
           if (region.id !== interaction.regionId) return region;
 
           if (interaction.mode === "move") {
-            const nextX = clamp(
-              interaction.initial.x + point.x - interaction.startX,
-              0,
-              editableImage.imageWidth - interaction.initial.width,
-            );
-            const nextY = clamp(
-              interaction.initial.y + point.y - interaction.startY,
-              0,
-              editableImage.imageHeight - interaction.initial.height,
+            const movedRect = getMovedRect(
+              interaction.initial,
+              interaction.startX,
+              interaction.startY,
+              point.x,
+              point.y,
+              editableImage.imageWidth,
+              editableImage.imageHeight,
+              getDuplicateMoveAxis(event, point),
             );
 
-            return { ...region, x: nextX, y: nextY, updatedAt: new Date().toISOString() };
+            return { ...region, ...movedRect, updatedAt: new Date().toISOString() };
           }
 
-          const width = clamp(
-            interaction.initial.width + point.x - interaction.startX,
-            12,
-            editableImage.imageWidth - interaction.initial.x,
-          );
-          const height = clamp(
-            interaction.initial.height + point.y - interaction.startY,
-            12,
-            editableImage.imageHeight - interaction.initial.y,
-          );
+          const deltaX = point.x - interaction.startX;
+          const deltaY = point.y - interaction.startY;
+          let x = interaction.initial.x;
+          let y = interaction.initial.y;
+          let width = interaction.initial.width;
+          let height = interaction.initial.height;
 
-          return { ...region, width, height, updatedAt: new Date().toISOString() };
+          if (interaction.edges.left) {
+            x = clamp(interaction.initial.x + deltaX, 0, interaction.initial.x + interaction.initial.width - 12);
+            width = interaction.initial.width + interaction.initial.x - x;
+          } else if (interaction.edges.right) {
+            width = clamp(interaction.initial.width + deltaX, 12, editableImage.imageWidth - interaction.initial.x);
+          }
+
+          if (interaction.edges.top) {
+            y = clamp(interaction.initial.y + deltaY, 0, interaction.initial.y + interaction.initial.height - 12);
+            height = interaction.initial.height + interaction.initial.y - y;
+          } else if (interaction.edges.bottom) {
+            height = clamp(interaction.initial.height + deltaY, 12, editableImage.imageHeight - interaction.initial.y);
+          }
+
+          return { ...region, x, y, width, height, updatedAt: new Date().toISOString() };
       };
 
       if (mode === "add") {
@@ -501,12 +881,45 @@ export function MultilingualTextMap() {
           } else {
             setAppState((state) => ({ ...state, regions: [...state.regions, region] }));
           }
+          recordRegionHistory(interaction.beforeRegions);
           openKeyDialog(region, { x: event.clientX + 12, y: event.clientY + 12 });
+          void runOcrForRegion(region, editableImage);
         }
+      }
+
+      if (interaction.mode === "move" && interaction.duplicatedRegion && point && editableImage) {
+        const movedRect = getMovedRect(
+          interaction.initial,
+          interaction.startX,
+          interaction.startY,
+          point.x,
+          point.y,
+          editableImage.imageWidth,
+          editableImage.imageHeight,
+          getDuplicateMoveAxis(event, point),
+        );
+        const region = {
+          ...interaction.duplicatedRegion,
+          ...movedRect,
+          updatedAt: new Date().toISOString(),
+        };
+        const applyFinalRect = (candidate: TextRegion) =>
+          candidate.id === region.id ? { ...candidate, ...movedRect, updatedAt: region.updatedAt } : candidate;
+
+        if (mode === "add") {
+          setDraftRegions((regions) => regions.map(applyFinalRect));
+        } else {
+          setAppState((state) => ({ ...state, regions: state.regions.map(applyFinalRect) }));
+        }
+
+        openKeyDialog(region, { x: event.clientX + 12, y: event.clientY + 12 });
+        void runOcrForRegion(region, editableImage);
       }
 
       setDraftRect(null);
       setInteraction(null);
+      interactionHistoryRecordedRef.current = false;
+      duplicateMoveAxisRef.current = undefined;
     };
 
     window.addEventListener("pointermove", onPointerMove);
@@ -625,19 +1038,59 @@ export function MultilingualTextMap() {
     });
     setDraftRegions([]);
     setSelectedRegionId(undefined);
+    resetRegionHistory();
     closeKeyDialog();
     if (!screenForm.name.trim()) {
       setScreenForm((form) => ({ ...form, name: file.name.replace(/\.[^.]+$/, "") }));
     }
   }
 
+  async function runOcrForRegion(region: TextRegion, imageTarget = editableImage) {
+    if (!imageTarget) return;
+
+    setOcrByRegion((state) => ({
+      ...state,
+      [region.id]: { status: "running" },
+    }));
+
+    try {
+      const cropDataUrl = await cropImageRegion(imageTarget, region);
+      const { recognize } = await import("tesseract.js");
+      const result = await recognize(cropDataUrl, "kor+eng");
+      const text = result.data.text.replace(/\s+/g, " ").trim();
+      const confidence = Number.isFinite(result.data.confidence) ? Math.round(result.data.confidence) : undefined;
+      if (!text) {
+        throw new Error("OCR로 인식된 텍스트가 없습니다.");
+      }
+
+      updateRegion(region.id, {
+        visibleText: text,
+        status: region.status === "unlinked" ? "needs_check" : region.status,
+      });
+      setTranslationQuery(text);
+      setOcrByRegion((state) => ({
+        ...state,
+        [region.id]: { status: "success", confidence },
+      }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "OCR을 실행할 수 없습니다.";
+      setOcrByRegion((state) => ({
+        ...state,
+        [region.id]: { status: "failed", error: message },
+      }));
+    }
+  }
+
   function openAddMode(group?: string) {
+    pushAddHistoryEntry();
+    setAddLeaveConfirmOpen(false);
     setMode("add");
-    setScreenForm({ ...defaultScreenForm, group: group ?? defaultScreenForm.group });
+    setScreenForm({ ...defaultScreenForm, group: group ?? appState.groups?.[0] ?? defaultScreenForm.group });
     setImageDraft(null);
     setDraftRegions([]);
     setSelectedRegionId(undefined);
     setEditingCell(null);
+    resetRegionHistory();
     closeKeyDialog();
   }
 
@@ -736,15 +1189,18 @@ export function MultilingualTextMap() {
     setImageDraft(null);
     setDraftRegions([]);
     setEditingCell(null);
+    resetRegionHistory();
   }
 
   function closeEditMode() {
+    setAddLeaveConfirmOpen(false);
     setMode("view");
     setImageDraft(null);
     setDraftRegions([]);
     setInteraction(null);
     setDraftRect(null);
     setEditingCell(null);
+    resetRegionHistory();
     closeKeyDialog();
   }
 
@@ -799,6 +1255,7 @@ export function MultilingualTextMap() {
         ],
         activeScreenId: screen.id,
       }));
+      consumeAddHistoryEntry();
       setMode("view");
       setScreenForm(defaultScreenForm);
       setImageDraft(null);
@@ -878,11 +1335,10 @@ export function MultilingualTextMap() {
     updateRegion(selectedRegionId, patch);
   }
 
-  function deleteSelectedRegion() {
-    if (!selectedRegionId) return;
-
+  function deleteRegion(regionId: string) {
+    recordRegionHistory(activeRegions);
     if (mode === "add") {
-      setDraftRegions((regions) => regions.filter((region) => region.id !== selectedRegionId));
+      setDraftRegions((regions) => regions.filter((region) => region.id !== regionId));
       setSelectedRegionId(undefined);
       closeKeyDialog();
       return;
@@ -890,10 +1346,21 @@ export function MultilingualTextMap() {
 
     setAppState((state) => ({
       ...state,
-      regions: state.regions.filter((region) => region.id !== selectedRegionId),
+      regions: state.regions.filter((region) => region.id !== regionId),
     }));
     setSelectedRegionId(undefined);
     closeKeyDialog();
+  }
+
+  function deleteSelectedRegion() {
+    if (!selectedRegionId) return;
+    deleteRegion(selectedRegionId);
+  }
+
+  function confirmDeleteSelectedRegion() {
+    if (!regionDeleteTargetId) return;
+    deleteRegion(regionDeleteTargetId);
+    setRegionDeleteTargetId(undefined);
   }
 
   function connectRegion(regionId: string, item: TranslationItem, options?: { closeDialog?: boolean }) {
@@ -903,7 +1370,7 @@ export function MultilingualTextMap() {
       translationItemId: item.id,
       translationOverrides: undefined,
       visibleText: region?.visibleText || item.kr || item.en || item.key,
-      status: region?.status === "unlinked" ? "linked" : region?.status,
+      status: region?.status === "unlinked" || region?.status === "needs_check" ? "linked" : region?.status,
     });
     setEditingCell(null);
     setTranslationQuery("");
@@ -933,7 +1400,7 @@ export function MultilingualTextMap() {
   }
 
   function beginCellEdit(region: TextRegion, item: TranslationItem | undefined, languageCode: LanguageCode) {
-    if (mode !== "add") return;
+    if (!isEditing) return;
     const { displayValue } = getCellValue(region, item, languageCode);
     setSelectedRegionId(region.id);
     setEditingCell({ regionId: region.id, languageCode });
@@ -982,39 +1449,128 @@ export function MultilingualTextMap() {
     const point = toPointFromReactEvent(event);
     if (!point) return;
 
-    setInteraction({ mode: "draw", startX: point.x, startY: point.y });
+    interactionHistoryRecordedRef.current = false;
+    duplicateMoveAxisRef.current = undefined;
+    setInteraction({ mode: "draw", startX: point.x, startY: point.y, beforeRegions: cloneRegions(activeRegions) });
     setDraftRect({ x: point.x, y: point.y, width: 0, height: 0 });
   }
 
-  function startMoving(event: React.PointerEvent<HTMLButtonElement>, region: TextRegion) {
+  function getResizeEdges(event: React.PointerEvent<HTMLButtonElement>): ResizeEdges {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const threshold = Math.min(8, Math.max(4, Math.min(rect.width, rect.height) / 3));
+
+    return {
+      top: event.clientY - rect.top <= threshold,
+      right: rect.right - event.clientX <= threshold,
+      bottom: rect.bottom - event.clientY <= threshold,
+      left: event.clientX - rect.left <= threshold,
+    };
+  }
+
+  function getResizeCursor(edges: ResizeEdges) {
+    if ((edges.top && edges.left) || (edges.bottom && edges.right)) return "nwse-resize";
+    if ((edges.top && edges.right) || (edges.bottom && edges.left)) return "nesw-resize";
+    if (edges.top || edges.bottom) return "ns-resize";
+    if (edges.left || edges.right) return "ew-resize";
+    return "move";
+  }
+
+  function updateRegionCursor(event: React.PointerEvent<HTMLButtonElement>) {
+    if (!isEditing) return;
+    if (event.altKey) {
+      event.currentTarget.style.cursor = "copy";
+      return;
+    }
+    event.currentTarget.style.cursor = getResizeCursor(getResizeEdges(event));
+  }
+
+  function suppressNextRegionClick(regionId: string) {
+    suppressedRegionClickRef.current = regionId;
+    window.setTimeout(() => {
+      if (suppressedRegionClickRef.current === regionId) {
+        suppressedRegionClickRef.current = undefined;
+      }
+    }, 0);
+  }
+
+  function consumeSuppressedRegionClick(regionId: string) {
+    if (suppressedRegionClickRef.current !== regionId) return false;
+    suppressedRegionClickRef.current = undefined;
+    return true;
+  }
+
+  function startRegionInteraction(event: React.PointerEvent<HTMLButtonElement>, region: TextRegion) {
     if (!isEditing) return;
     event.stopPropagation();
     const point = toPointFromReactEvent(event);
     if (!point) return;
+    const initial = { x: region.x, y: region.y, width: region.width, height: region.height };
+    const beforeRegions = cloneRegions(activeRegions);
 
+    if (event.altKey) {
+      duplicateMoveAxisRef.current = undefined;
+      const now = new Date().toISOString();
+      const duplicate: TextRegion = {
+        ...region,
+        id: createId("region"),
+        visibleText: "",
+        translationItemId: undefined,
+        translationOverrides: undefined,
+        status: "unlinked",
+        memo: "",
+        createdAt: now,
+        updatedAt: now,
+      };
+
+      if (mode === "add") {
+        setDraftRegions((regions) => [...regions, duplicate]);
+      } else {
+        setAppState((state) => ({ ...state, regions: [...state.regions, duplicate] }));
+      }
+
+      recordRegionHistory(beforeRegions);
+      interactionHistoryRecordedRef.current = true;
+      suppressNextRegionClick(region.id);
+      setSelectedRegionId(duplicate.id);
+      setInteraction({
+        mode: "move",
+        regionId: duplicate.id,
+        startX: point.x,
+        startY: point.y,
+        initial,
+        beforeRegions,
+        duplicatedRegion: duplicate,
+        constrainAxis: event.shiftKey,
+      });
+      return;
+    }
+
+    const edges = getResizeEdges(event);
+    const isResize = edges.top || edges.right || edges.bottom || edges.left;
+
+    interactionHistoryRecordedRef.current = false;
+    duplicateMoveAxisRef.current = undefined;
     setSelectedRegionId(region.id);
+    if (isResize) {
+      setInteraction({
+        mode: "resize",
+        regionId: region.id,
+        startX: point.x,
+        startY: point.y,
+        initial,
+        beforeRegions,
+        edges,
+      });
+      return;
+    }
+
     setInteraction({
       mode: "move",
       regionId: region.id,
       startX: point.x,
       startY: point.y,
-      initial: { x: region.x, y: region.y, width: region.width, height: region.height },
-    });
-  }
-
-  function startResizing(event: React.PointerEvent<HTMLSpanElement>, region: TextRegion) {
-    if (!isEditing) return;
-    event.stopPropagation();
-    const point = toPointFromReactEvent(event);
-    if (!point) return;
-
-    setSelectedRegionId(region.id);
-    setInteraction({
-      mode: "resize",
-      regionId: region.id,
-      startX: point.x,
-      startY: point.y,
-      initial: { x: region.x, y: region.y, width: region.width, height: region.height },
+      initial,
+      beforeRegions,
     });
   }
 
@@ -1032,7 +1588,7 @@ export function MultilingualTextMap() {
     }
 
     return (
-      <div className="image-frame" style={{ width: isEditing ? "100%" : `${(360 * imageZoom) / 100}px` }}>
+      <div className="image-frame" style={{ width: isEditing ? "100%" : "360px" }}>
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img src={currentScreen.imageUrl} alt={currentScreen.name} />
         <div ref={overlayRef} className="region-layer" onPointerDown={startDrawing}>
@@ -1054,20 +1610,26 @@ export function MultilingualTextMap() {
                   width: `${(region.width / currentScreen.imageWidth) * 100}%`,
                   height: `${(region.height / currentScreen.imageHeight) * 100}%`,
                 }}
-                onPointerDown={(event) => startMoving(event, region)}
+                onPointerMove={updateRegionCursor}
+                onPointerLeave={(event) => {
+                  if (isEditing) event.currentTarget.style.cursor = "move";
+                }}
+                onPointerDown={(event) => startRegionInteraction(event, region)}
                 onClick={(event) => {
                   event.stopPropagation();
+                  if (consumeSuppressedRegionClick(region.id)) return;
                   if (isEditing) {
                     openKeyDialog(region, { x: event.clientX + 12, y: event.clientY + 12 });
+                    if (!region.visibleText && ocrByRegion[region.id]?.status !== "running") {
+                      void runOcrForRegion(region);
+                    }
                     return;
                   }
                   setSelectedRegionId(region.id);
                 }}
                 aria-label={region.visibleText || "텍스트 영역"}
                 title={region.visibleText || "텍스트 영역"}
-              >
-                {isEditing ? <i onPointerDown={(event) => startResizing(event, region)} aria-hidden="true" /> : null}
-              </button>
+              />
             );
           })}
           {draftRect ? (
@@ -1117,16 +1679,22 @@ export function MultilingualTextMap() {
                   width: `${(region.width / imageDraft.imageWidth) * 100}%`,
                   height: `${(region.height / imageDraft.imageHeight) * 100}%`,
                 }}
-                onPointerDown={(event) => startMoving(event, region)}
+                onPointerMove={updateRegionCursor}
+                onPointerLeave={(event) => {
+                  event.currentTarget.style.cursor = "move";
+                }}
+                onPointerDown={(event) => startRegionInteraction(event, region)}
                 onClick={(event) => {
                   event.stopPropagation();
+                  if (consumeSuppressedRegionClick(region.id)) return;
                   openKeyDialog(region, { x: event.clientX + 12, y: event.clientY + 12 });
+                  if (!region.visibleText && ocrByRegion[region.id]?.status !== "running") {
+                    void runOcrForRegion(region);
+                  }
                 }}
                 aria-label={region.visibleText || "텍스트 영역"}
                 title={region.visibleText || "텍스트 영역"}
-              >
-                <i onPointerDown={(event) => startResizing(event, region)} aria-hidden="true" />
-              </button>
+              />
             );
           })}
           {draftRect ? (
@@ -1155,6 +1723,7 @@ export function MultilingualTextMap() {
                 {LANGUAGE_DEFS.map((language) => (
                   <th key={language.code}>{language.label}</th>
                 ))}
+                <th className="translation-note-head">비고</th>
               </tr>
             </thead>
             <tbody>
@@ -1219,6 +1788,26 @@ export function MultilingualTextMap() {
                         </td>
                       );
                     })}
+                    <td className="translation-note-cell">
+                      {mode === "add" ? (
+                        <textarea
+                          className="translation-note-editor"
+                          value={region.memo}
+                          onChange={(event) => updateRegion(region.id, { memo: event.target.value })}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            setSelectedRegionId(region.id);
+                          }}
+                          onDoubleClick={(event) => event.stopPropagation()}
+                          placeholder="비고 입력"
+                          aria-label="비고 입력"
+                        />
+                      ) : (
+                        <span className={region.memo ? "translation-note-value" : "translation-note-value empty"}>
+                          {region.memo || "-"}
+                        </span>
+                      )}
+                    </td>
                   </tr>
                 );
               })}
@@ -1232,6 +1821,14 @@ export function MultilingualTextMap() {
     );
   }
 
+  function getMatchedLanguagePreview(item: TranslationItem, matchType: string) {
+    const language = LANGUAGE_DEFS.find(
+      ({ code, label }) => code !== "kr" && code !== "en" && matchType.startsWith(`${label} `),
+    );
+    if (!language || !item[language.code]) return "";
+    return `${language.label}: ${item[language.code]} · `;
+  }
+
   function renderKeyDialog() {
     if (!keyDialogRegionId || !keyDialogAnchor) return null;
 
@@ -1242,6 +1839,8 @@ export function MultilingualTextMap() {
       ? translationsById.get(dialogRegion.translationItemId)
       : undefined;
     const pendingItem = pendingTranslationItemId ? translationsById.get(pendingTranslationItemId) : undefined;
+    const ocrState = ocrByRegion[dialogRegion.id];
+    const candidateRows = searchQuery.trim() ? searchCandidates : [];
 
     return (
       <section
@@ -1259,22 +1858,35 @@ export function MultilingualTextMap() {
       >
         <div className="key-dialog-head">
           <h2 id="key-dialog-title">번역 Key 연결</h2>
+          <p>
+            {ocrState?.status === "running"
+              ? "OCR 인식 중..."
+              : ocrState?.status === "success"
+                ? `OCR 완료${ocrState.confidence === undefined ? "" : ` · 신뢰도 ${ocrState.confidence}%`}`
+                : ocrState?.status === "failed"
+                  ? "OCR 실패 · 수동 검색으로 연결하세요"
+                  : "OCR 결과 또는 검색어로 후보를 찾습니다"}
+          </p>
         </div>
 
         <label className="key-dialog-search">
           <span aria-hidden="true" />
           <input
-            autoFocus
             value={translationQuery}
-            onChange={(event) => setTranslationQuery(event.target.value)}
-            placeholder="플레이스홀더"
+            onChange={(event) => {
+              const text = event.target.value;
+              setTranslationQuery(text);
+              updateRegion(dialogRegion.id, { visibleText: text });
+            }}
+            placeholder="OCR 결과 또는 검색어 입력"
           />
         </label>
 
         <div className="dialog-results">
-          {searchResults.map((item) => {
+          {candidateRows.map(({ item, matchType }) => {
             const source = sourceById.get(item.sourceId);
             const duplicate = isDuplicateCandidate(item, searchableTranslations);
+            const linkedCount = linkedTranslationUsage.get(item.id) ?? 0;
 
             return (
               <button
@@ -1283,16 +1895,29 @@ export function MultilingualTextMap() {
                 className={`key-result-row ${item.id === pendingTranslationItemId ? "selected" : ""}`}
                 onClick={() => setPendingTranslationItemId(item.id)}
               >
-                <span>{item.key}</span>
-                <strong>{item.kr || item.en || "번역 없음"}</strong>
+                <div className="key-result-title">
+                  <span>{item.key}</span>
+                  {linkedCount > 0 ? (
+                    <small className="key-linked-badge" title={`${linkedCount}개 텍스트 영역에 연결됨`}>
+                      <i aria-hidden="true" />
+                      연결됨
+                    </small>
+                  ) : null}
+                </div>
+                <strong>{item.kr || "KR 없음"}</strong>
                 <em>
-                  {source?.fileName ?? "알 수 없는 소스"}
+                  {getMatchedLanguagePreview(item, matchType)}
+                  {item.en || "EN 없음"} · {source?.fileName ?? "알 수 없는 소스"} · {matchType}
                   {duplicate ? " · 중복 후보" : ""}
                 </em>
               </button>
             );
           })}
-          {searchResults.length === 0 ? <div className="empty-list">검색 결과가 없습니다.</div> : null}
+          {candidateRows.length === 0 ? (
+            <div className="empty-list">
+              {searchQuery.trim() ? "검색 결과가 없습니다." : "OCR 결과를 기다리거나 직접 검색어를 입력하세요."}
+            </div>
+          ) : null}
         </div>
 
         <div className="dialog-actions">
@@ -1539,6 +2164,65 @@ export function MultilingualTextMap() {
     );
   }
 
+  function renderRegionDeleteConfirmDialog() {
+    if (!regionDeleteTargetId || !isEditing) return null;
+
+    return (
+      <div
+        className="confirm-modal-backdrop"
+        role="presentation"
+        data-region-selection-scope="true"
+        onClick={() => setRegionDeleteTargetId(undefined)}
+      >
+        <section
+          className="confirm-modal"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="region-delete-confirm-title"
+          onClick={(event) => event.stopPropagation()}
+        >
+          <h2 id="region-delete-confirm-title">삭제하시겠습니까?</h2>
+          <p>선택한 텍스트 영역이 삭제됩니다.</p>
+          <div className="confirm-actions">
+            <button type="button" className="confirm-cancel" onClick={() => setRegionDeleteTargetId(undefined)}>
+              취소
+            </button>
+            <button type="button" className="confirm-delete" onClick={confirmDeleteSelectedRegion}>
+              삭제
+            </button>
+          </div>
+        </section>
+      </div>
+    );
+  }
+
+  function renderAddLeaveConfirmDialog() {
+    if (!addLeaveConfirmOpen || mode !== "add") return null;
+
+    return (
+      <div className="confirm-modal-backdrop" role="presentation" onClick={() => setAddLeaveConfirmOpen(false)}>
+        <section
+          className="confirm-modal"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="add-leave-confirm-title"
+          onClick={(event) => event.stopPropagation()}
+        >
+          <h2 id="add-leave-confirm-title">화면 추가를 종료하시겠습니까?</h2>
+          <p>작성 중인 내용은 저장되지 않습니다.</p>
+          <div className="confirm-actions">
+            <button type="button" className="confirm-cancel" onClick={() => setAddLeaveConfirmOpen(false)}>
+              취소
+            </button>
+            <button type="button" className="confirm-delete" onClick={leaveAddMode}>
+              나가기
+            </button>
+          </div>
+        </section>
+      </div>
+    );
+  }
+
   function renderAddMode() {
     const isEditMode = mode === "edit";
     const hasScreenImage = Boolean(imageDraft || (isEditMode && currentScreen));
@@ -1555,7 +2239,7 @@ export function MultilingualTextMap() {
         />
 
         <div className="add-mode-title">
-          <button type="button" className="add-back-button" onClick={closeEditMode} aria-label="뒤로가기">
+          <button type="button" className="add-back-button" onClick={requestLeaveAddMode} aria-label="뒤로가기">
             <BackArrowIcon />
           </button>
           <h1>{isEditMode ? "화면 수정" : "화면 추가"}</h1>
@@ -1582,6 +2266,23 @@ export function MultilingualTextMap() {
 
         <section className="add-detail-pane">
           <div className="add-form-bar">
+            <label className="add-field">
+              <span>그룹</span>
+              <div className="add-select-shell">
+                <select
+                  value={screenForm.group}
+                  onChange={(event) => setScreenForm((form) => ({ ...form, group: event.target.value }))}
+                >
+                  {groupOptions.map((group) => (
+                    <option key={group} value={group}>
+                      {group}
+                    </option>
+                  ))}
+                </select>
+                <SelectChevronIcon />
+              </div>
+            </label>
+
             <label className="add-field">
               <span>화면명</span>
               <div className="add-input-shell">
@@ -1684,23 +2385,6 @@ export function MultilingualTextMap() {
               {renderViewSidebar()}
 
               <section className="canvas-panel">
-                <div className="view-zoom-controls" aria-label="화면 확대 축소">
-                  <button
-                    type="button"
-                    onClick={() => setImageZoom((zoom) => clamp(zoom - 10, 50, 220))}
-                    title="줌아웃"
-                  >
-                    -
-                  </button>
-                  <span>{imageZoom}%</span>
-                  <button
-                    type="button"
-                    onClick={() => setImageZoom((zoom) => clamp(zoom + 10, 50, 220))}
-                    title="줌인"
-                  >
-                    +
-                  </button>
-                </div>
                 <div className="image-stage">{renderScreenImage()}</div>
               </section>
 
@@ -1726,10 +2410,7 @@ export function MultilingualTextMap() {
               {renderViewSidebar()}
               <section className="empty-view">
                 <strong>등록된 화면이 없습니다.</strong>
-                <span>첫 화면을 추가하면 이후 앱 진입 시 조회 화면이 먼저 표시됩니다.</span>
-                <button type="button" className="button primary" onClick={() => openAddMode()}>
-                  화면 추가
-                </button>
+                <span>그룹과 화면을 추가하면 표시돼요.</span>
               </section>
             </>
           )}
@@ -1922,6 +2603,7 @@ export function MultilingualTextMap() {
                 {searchResults.map((item) => {
                   const source = sourceById.get(item.sourceId);
                   const duplicate = isDuplicateCandidate(item, searchableTranslations);
+                  const linkedCount = linkedTranslationUsage.get(item.id) ?? 0;
 
                   return (
                     <button
@@ -1931,7 +2613,15 @@ export function MultilingualTextMap() {
                       disabled={!selectedRegion}
                       onClick={() => connectSelectedRegion(item)}
                     >
-                      <strong>{item.key}</strong>
+                      <div className="result-row-title">
+                        <strong>{item.key}</strong>
+                        {linkedCount > 0 ? (
+                          <small className="key-linked-badge" title={`${linkedCount}개 텍스트 영역에 연결됨`}>
+                            <i aria-hidden="true" />
+                            연결됨
+                          </small>
+                        ) : null}
+                      </div>
                       <span>{item.kr || item.en || "번역 없음"}</span>
                       <em>
                         {source?.fileName ?? "알 수 없는 소스"}
@@ -1958,6 +2648,8 @@ export function MultilingualTextMap() {
       {renderKeyDialog()}
       {renderTranslationSourceDialog()}
       {renderDeleteConfirmDialog()}
+      {renderRegionDeleteConfirmDialog()}
+      {renderAddLeaveConfirmDialog()}
     </main>
   );
 }
