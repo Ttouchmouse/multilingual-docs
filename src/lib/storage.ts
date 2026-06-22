@@ -1,10 +1,22 @@
 import type { AppState, TranslationItem, TranslationSource } from "./types";
-import { loadSupabaseSnapshot } from "./supabase-storage";
+import { isSupabaseConfigured } from "./supabase";
+import { loadSupabaseSnapshot, saveSupabaseSnapshot } from "./supabase-storage";
 
 const DB_NAME = "multilingual-text-map";
 const STORE_NAME = "kv";
 const APP_STATE_KEY = "app-state";
 const TRANSLATIONS_KEY = "translations";
+
+export type PersistedDataSource = "supabase" | "indexeddb" | "empty";
+export type SupabaseLoadStatus = "success" | "empty" | "failed" | "unconfigured";
+
+type PersistedSnapshot = {
+  appState: AppState;
+  translations: TranslationItem[];
+};
+
+let pendingPersistedSnapshot: PersistedSnapshot | undefined;
+let persistedSaveLoop: Promise<void> | null = null;
 
 function openDatabase() {
   return new Promise<IDBDatabase>((resolve, reject) => {
@@ -101,39 +113,117 @@ function normalizeAppState(appState: AppState | undefined): AppState {
   };
 }
 
-export async function loadPersistedData() {
-  try {
-    const cloudData = await loadSupabaseSnapshot();
-    if (cloudData) {
-      await Promise.all([
-        setValue(APP_STATE_KEY, normalizeAppState(cloudData.appState)),
-        setValue(TRANSLATIONS_KEY, cloudData.translations ?? []),
-      ]);
+function hasPersistedData(appState: AppState | undefined, translations: TranslationItem[] | undefined) {
+  return Boolean(
+    appState?.screens?.length ||
+      appState?.regions?.length ||
+      appState?.sources?.length ||
+      appState?.source ||
+      appState?.groups?.length ||
+      translations?.length,
+  );
+}
 
-      return {
-        appState: normalizeAppState(cloudData.appState),
-        translations: cloudData.translations ?? [],
-      };
+export async function loadPersistedData() {
+  let supabaseStatus: SupabaseLoadStatus = "unconfigured";
+
+  if (isSupabaseConfigured) {
+    try {
+      const cloudData = await loadSupabaseSnapshot();
+      if (cloudData) {
+        supabaseStatus = "success";
+        const normalizedCloudState = normalizeAppState(cloudData.appState);
+        const cloudTranslations = cloudData.translations ?? [];
+        console.info("[persistence] Supabase snapshot loaded", {
+          screens: normalizedCloudState.screens.length,
+          regions: normalizedCloudState.regions.length,
+          sources: normalizedCloudState.sources?.length ?? 0,
+          translations: cloudTranslations.length,
+        });
+
+        await Promise.all([
+          setValue(APP_STATE_KEY, normalizedCloudState),
+          setValue(TRANSLATIONS_KEY, cloudTranslations),
+        ]);
+        console.info("[persistence] IndexedDB cache refreshed from Supabase snapshot.");
+
+        return {
+          appState: normalizedCloudState,
+          translations: cloudTranslations,
+          source: "supabase" as PersistedDataSource,
+          supabaseStatus,
+        };
+      }
+      supabaseStatus = "empty";
+      console.info("[persistence] Supabase snapshot not found. Checking IndexedDB fallback.");
+    } catch (error) {
+      supabaseStatus = "failed";
+      console.error("[persistence] Supabase load failed. Falling back to local IndexedDB.", error);
     }
-  } catch (error) {
-    console.warn("Supabase load failed. Falling back to local IndexedDB.", error);
+  } else {
+    console.warn("[persistence] Supabase is not configured. Checking IndexedDB fallback.");
   }
 
   const [appState, translations] = await Promise.all([
     getValue<AppState>(APP_STATE_KEY),
     getValue<TranslationItem[]>(TRANSLATIONS_KEY),
   ]);
+  const normalizedLocalState = normalizeAppState(appState);
+  const localTranslations = translations ?? [];
+  const source: PersistedDataSource = hasPersistedData(normalizedLocalState, localTranslations) ? "indexeddb" : "empty";
+
+  console.info("[persistence] Local IndexedDB load result", {
+    source,
+    supabaseStatus,
+    screens: normalizedLocalState.screens.length,
+    regions: normalizedLocalState.regions.length,
+    sources: normalizedLocalState.sources?.length ?? 0,
+    translations: localTranslations.length,
+  });
 
   return {
-    appState: normalizeAppState(appState),
-    translations: translations ?? [],
+    appState: normalizedLocalState,
+    translations: localTranslations,
+    source,
+    supabaseStatus,
   };
 }
 
-export async function saveAppState(appState: AppState) {
-  await setValue(APP_STATE_KEY, appState);
-}
+export function savePersistedData(appState: AppState, translations: TranslationItem[]) {
+  pendingPersistedSnapshot = { appState, translations };
 
-export async function saveTranslations(translations: TranslationItem[]) {
-  await setValue(TRANSLATIONS_KEY, translations);
+  if (persistedSaveLoop) {
+    console.info("[persistence] Save already in progress. Queued latest application snapshot.");
+    return persistedSaveLoop;
+  }
+
+  persistedSaveLoop = (async () => {
+    while (pendingPersistedSnapshot) {
+      const snapshot = pendingPersistedSnapshot;
+      pendingPersistedSnapshot = undefined;
+
+      if (!isSupabaseConfigured) {
+        throw new Error("Supabase 환경변수가 설정되지 않아 원본 데이터를 저장할 수 없습니다.");
+      }
+
+      console.info("[persistence] Cloud-first save started", {
+        screens: snapshot.appState.screens.length,
+        regions: snapshot.appState.regions.length,
+        sources: snapshot.appState.sources?.length ?? 0,
+        translations: snapshot.translations.length,
+      });
+
+      await saveSupabaseSnapshot(snapshot.appState, snapshot.translations);
+      await Promise.all([
+        setValue(APP_STATE_KEY, snapshot.appState),
+        setValue(TRANSLATIONS_KEY, snapshot.translations),
+      ]);
+
+      console.info("[persistence] Cloud save succeeded. IndexedDB cache refreshed.");
+    }
+  })().finally(() => {
+    persistedSaveLoop = null;
+  });
+
+  return persistedSaveLoop;
 }

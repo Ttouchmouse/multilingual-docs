@@ -71,6 +71,7 @@ export type TextRegion = {
   height: number;
   translationItemId?: string;
   translationOverrides?: Partial<Record<LanguageCode, string>>;
+  translationOverrideHistory?: Partial<Record<LanguageCode, string[]>>;
   status: TextRegionStatus;
   memo: string;
   createdAt: string;

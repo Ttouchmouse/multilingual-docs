@@ -23,10 +23,10 @@ import {
 import {
   getInitialAppState,
   loadPersistedData,
-  saveAppState,
-  saveTranslations,
+  savePersistedData,
+  type SupabaseLoadStatus,
 } from "@/lib/storage";
-import { saveSupabaseSnapshot, uploadScreenImage } from "@/lib/supabase-storage";
+import { uploadScreenImage } from "@/lib/supabase-storage";
 
 type ImageRect = Pick<TextRegion, "x" | "y" | "width" | "height">;
 type AppMode = "view" | "add" | "edit";
@@ -109,6 +109,12 @@ type RegionOcrState = {
   error?: string;
 };
 
+type PersistenceStatus = {
+  phase: "loading" | "ready" | "saving" | "saved" | "warning" | "error";
+  message: string;
+  recovery?: "save" | "reload";
+};
+
 const DRAFT_SCREEN_ID = "__draft_screen__";
 
 const defaultScreenForm: ScreenForm = {
@@ -135,6 +141,10 @@ function getNormalizedRect(startX: number, startY: number, x: number, y: number)
     width: Math.abs(x - startX),
     height: Math.abs(y - startY),
   };
+}
+
+function isScreenRegion(region: TextRegion) {
+  return region.width > 0 && region.height > 0;
 }
 
 function getMovedRect(
@@ -164,6 +174,14 @@ function cloneRegions(regions: TextRegion[]) {
   return regions.map((region) => ({
     ...region,
     translationOverrides: region.translationOverrides ? { ...region.translationOverrides } : undefined,
+    translationOverrideHistory: region.translationOverrideHistory
+      ? Object.fromEntries(
+          Object.entries(region.translationOverrideHistory).map(([languageCode, history]) => [
+            languageCode,
+            history ? [...history] : history,
+          ]),
+        )
+      : undefined,
   }));
 }
 
@@ -273,6 +291,27 @@ function getSourceImportedAt(source: TranslationSource) {
   return source.importedAt ?? source.parsedAt ?? source.uploadedAt ?? "";
 }
 
+function getImportedAtTimestamp(source: TranslationSource | undefined, item?: TranslationItem) {
+  const sourceTimestamp = source ? Date.parse(getSourceImportedAt(source)) : Number.NaN;
+  if (Number.isFinite(sourceTimestamp)) return sourceTimestamp;
+
+  const itemTimestamp = item ? Date.parse(item.createdAt) : Number.NaN;
+  return Number.isFinite(itemTimestamp) ? itemTimestamp : 0;
+}
+
+function formatImportedAt(value: string) {
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return value || "-";
+
+  return new Intl.DateTimeFormat("ko-KR", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(timestamp);
+}
+
 function formatSourceName(fileName: string) {
   return fileName.replace(/\.[^.]+$/, "");
 }
@@ -342,19 +381,33 @@ export function MultilingualTextMap() {
   const [interaction, setInteraction] = useState<Interaction | null>(null);
   const [editingCell, setEditingCell] = useState<EditingCell | null>(null);
   const [editingCellValue, setEditingCellValue] = useState("");
+  const [draggedRegionId, setDraggedRegionId] = useState<string>();
+  const [dragOverRegionId, setDragOverRegionId] = useState<string>();
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
   const [editingGroup, setEditingGroup] = useState<EditingGroup | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
   const [regionDeleteTargetId, setRegionDeleteTargetId] = useState<string>();
   const [addLeaveConfirmOpen, setAddLeaveConfirmOpen] = useState(false);
   const [sourceDialogOpen, setSourceDialogOpen] = useState(false);
+  const [updateCandidateRegionId, setUpdateCandidateRegionId] = useState<string>();
   const [ocrByRegion, setOcrByRegion] = useState<Record<string, RegionOcrState>>({});
+  const [persistenceStatus, setPersistenceStatus] = useState<PersistenceStatus>({
+    phase: "loading",
+    message: "Supabase 데이터를 불러오는 중입니다.",
+  });
+  const [persistenceRetryVersion, setPersistenceRetryVersion] = useState(0);
 
   const overlayRef = useRef<HTMLDivElement>(null);
+  const imageViewportRef = useRef<HTMLElement | null>(null);
   const imageFileInputRef = useRef<HTMLInputElement>(null);
   const translationFileInputRef = useRef<HTMLInputElement>(null);
+  const translationTableWrapRef = useRef<HTMLDivElement>(null);
   const itemRefs = useRef<Record<string, HTMLElement | null>>({});
   const defaultDataLoadAttempted = useRef(false);
+  const skipNextSupabaseSaveRef = useRef(true);
+  const supabaseLoadStatusRef = useRef<SupabaseLoadStatus>("unconfigured");
+  const persistenceRevisionRef = useRef(0);
+  const showNextSaveFeedbackRef = useRef(false);
   const suppressedRegionClickRef = useRef<string | undefined>(undefined);
   const regionHistoryRef = useRef<RegionHistory>({ scope: "", undo: [], redo: [] });
   const interactionHistoryRecordedRef = useRef(false);
@@ -424,6 +477,44 @@ export function MultilingualTextMap() {
   const translationsById = useMemo(() => {
     return new Map(translations.map((item) => [item.id, item]));
   }, [translations]);
+  const updateCandidatesByItemId = useMemo(() => {
+    const itemsByKey = new Map<string, TranslationItem[]>();
+    const candidatesByItemId = new Map<string, TranslationItem[]>();
+
+    for (const item of translations) {
+      if (!item.key) continue;
+      const items = itemsByKey.get(item.key);
+      if (items) {
+        items.push(item);
+      } else {
+        itemsByKey.set(item.key, [item]);
+      }
+    }
+
+    for (const currentItem of translations) {
+      const currentSource = sourceById.get(currentItem.sourceId);
+      const currentImportedAt = getImportedAtTimestamp(currentSource, currentItem);
+      const candidates = (itemsByKey.get(currentItem.key) ?? [])
+        .filter((candidate) => {
+          if (candidate.id === currentItem.id || candidate.sourceId === currentItem.sourceId) return false;
+          if (!enabledSourceIds.has(candidate.sourceId)) return false;
+
+          const candidateSource = sourceById.get(candidate.sourceId);
+          return getImportedAtTimestamp(candidateSource, candidate) > currentImportedAt;
+        })
+        .sort((left, right) => {
+          const leftImportedAt = getImportedAtTimestamp(sourceById.get(left.sourceId), left);
+          const rightImportedAt = getImportedAtTimestamp(sourceById.get(right.sourceId), right);
+          return rightImportedAt - leftImportedAt;
+        });
+
+      if (candidates.length > 0) {
+        candidatesByItemId.set(currentItem.id, candidates);
+      }
+    }
+
+    return candidatesByItemId;
+  }, [enabledSourceIds, sourceById, translations]);
   const linkedTranslationUsage = useMemo(() => {
     const usage = new Map<string, number>();
 
@@ -627,12 +718,54 @@ export function MultilingualTextMap() {
         if (!loadedState.activeScreenId && loadedState.screens[0]) {
           loadedState.activeScreenId = loadedState.screens[0].id;
         }
+        supabaseLoadStatusRef.current = data.supabaseStatus;
+        skipNextSupabaseSaveRef.current = true;
+        console.info("[persistence] Applying loaded data to View Mode", {
+          source: data.source,
+          supabaseStatus: data.supabaseStatus,
+          activeScreenId: loadedState.activeScreenId,
+          screens: loadedState.screens.length,
+          regions: loadedState.regions.length,
+          sources: loadedState.sources?.length ?? 0,
+          translations: data.translations.length,
+        });
         setAppState(loadedState);
         setTranslations(data.translations);
+        if (data.supabaseStatus === "success") {
+          setPersistenceStatus({
+            phase: "ready",
+            message: "Supabase 원본 데이터를 불러왔습니다.",
+          });
+        } else if (data.source === "indexeddb") {
+          setPersistenceStatus({
+            phase: "warning",
+            message:
+              data.supabaseStatus === "failed"
+                ? "Supabase 로드에 실패해 IndexedDB 캐시를 표시하고 있습니다. 새로고침 후 다시 확인해주세요."
+                : "Supabase 원본이 없어 IndexedDB 캐시를 표시하고 있습니다.",
+            recovery: data.supabaseStatus === "failed" ? "reload" : undefined,
+          });
+        } else {
+          setPersistenceStatus({
+            phase: data.supabaseStatus === "failed" ? "error" : "ready",
+            message:
+              data.supabaseStatus === "failed"
+                ? "Supabase와 IndexedDB에서 데이터를 불러오지 못했습니다."
+                : "저장된 데이터가 없습니다.",
+            recovery: data.supabaseStatus === "failed" ? "reload" : undefined,
+          });
+        }
         setIsLoaded(true);
       })
       .catch((error) => {
-        console.error(error);
+        supabaseLoadStatusRef.current = "failed";
+        skipNextSupabaseSaveRef.current = true;
+        console.error("[persistence] Persisted data load failed. Showing empty state only after all stores failed.", error);
+        setPersistenceStatus({
+          phase: "error",
+          message: "저장 데이터를 불러오지 못했습니다. 네트워크와 Supabase 설정을 확인해주세요.",
+          recovery: "reload",
+        });
         setIsLoaded(true);
       });
 
@@ -672,24 +805,81 @@ export function MultilingualTextMap() {
 
   useEffect(() => {
     if (!isLoaded) return;
-    saveAppState(appState).catch(console.error);
-  }, [appState, isLoaded]);
-
-  useEffect(() => {
-    if (!isLoaded) return;
-    saveTranslations(translations).catch(console.error);
-  }, [translations, isLoaded]);
-
-  useEffect(() => {
-    if (!isLoaded) return;
-    const timeout = window.setTimeout(() => {
-      saveSupabaseSnapshot(appState, translations).catch((error) => {
-        console.warn("Supabase save failed. Local IndexedDB data is still saved.", error);
+    if (skipNextSupabaseSaveRef.current) {
+      skipNextSupabaseSaveRef.current = false;
+      console.info("[persistence] Skipping initial Supabase save after hydration.");
+      return;
+    }
+    if (supabaseLoadStatusRef.current === "failed") {
+      console.error("[persistence] Cloud-first save blocked because the Supabase source failed to load.");
+      setPersistenceStatus({
+        phase: "warning",
+        message: "Supabase 원본을 불러오지 못해 변경사항 저장이 차단되었습니다. 새로고침 후 다시 시도해주세요.",
+        recovery: "reload",
       });
+      return;
+    }
+    const revision = ++persistenceRevisionRef.current;
+    const showSaveFeedback = showNextSaveFeedbackRef.current;
+    showNextSaveFeedbackRef.current = false;
+
+    if (showSaveFeedback) {
+      setPersistenceStatus({
+        phase: "saving",
+        message: "Supabase에 변경사항을 저장하는 중입니다.",
+      });
+    }
+
+    const timeout = window.setTimeout(() => {
+      savePersistedData(appState, translations)
+        .then(() => {
+          if (persistenceRevisionRef.current !== revision) return;
+          if (showSaveFeedback) {
+            setPersistenceStatus({
+              phase: "saved",
+              message: "Supabase 저장이 완료되었습니다.",
+            });
+          }
+        })
+        .catch((error) => {
+          if (persistenceRevisionRef.current !== revision) return;
+          const message = error instanceof Error ? error.message : "알 수 없는 저장 오류";
+          console.error("[persistence] Cloud-first save failed. IndexedDB cache was not updated.", error);
+          setPersistenceStatus({
+            phase: "error",
+            message: `Supabase 저장에 실패했습니다. 변경사항이 저장되지 않았습니다. ${message}`,
+            recovery: "save",
+          });
+        });
     }, 500);
 
     return () => window.clearTimeout(timeout);
-  }, [appState, isLoaded, translations]);
+  }, [appState, isLoaded, persistenceRetryVersion, translations]);
+
+  useEffect(() => {
+    if (persistenceStatus.phase !== "saved") return;
+
+    const timeout = window.setTimeout(() => {
+      setPersistenceStatus({
+        phase: "ready",
+        message: "Supabase 원본 데이터를 사용 중입니다.",
+      });
+    }, 2500);
+
+    return () => window.clearTimeout(timeout);
+  }, [persistenceStatus.phase]);
+
+  useEffect(() => {
+    if (persistenceStatus.phase !== "saving") return;
+
+    const onBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [persistenceStatus.phase]);
 
   useEffect(() => {
     if (!isLoaded || translationSources.length > 0 || translations.length > 0 || defaultDataLoadAttempted.current) return;
@@ -699,7 +889,7 @@ export function MultilingualTextMap() {
 
   useEffect(() => {
     if (!selectedRegionId) return;
-    itemRefs.current[selectedRegionId]?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    window.requestAnimationFrame(() => scrollTableRowIntoView(selectedRegionId));
   }, [selectedRegionId]);
 
   useEffect(() => {
@@ -1223,7 +1413,13 @@ export function MultilingualTextMap() {
       try {
         uploadedImage = await uploadScreenImage(screenId, imageDraft.imageUrl);
       } catch (error) {
-        console.warn("Supabase image upload failed. Keeping local data URL.", error);
+        const message = error instanceof Error ? error.message : "알 수 없는 이미지 업로드 오류";
+        console.error("[persistence] Supabase image upload failed. Screen save was cancelled.", error);
+        setPersistenceStatus({
+          phase: "error",
+          message: `화면 이미지 업로드에 실패해 저장을 중단했습니다. ${message}`,
+        });
+        return;
       }
 
       const screen: Screen = {
@@ -1242,6 +1438,7 @@ export function MultilingualTextMap() {
         updatedAt: now,
       };
 
+      showNextSaveFeedbackRef.current = true;
       setAppState((state) => ({
         ...state,
         screens: [...state.screens, screen],
@@ -1274,10 +1471,17 @@ export function MultilingualTextMap() {
       try {
         uploadedImage = await uploadScreenImage(currentScreen.id, imageDraft.imageUrl);
       } catch (error) {
-        console.warn("Supabase image upload failed. Keeping local data URL.", error);
+        const message = error instanceof Error ? error.message : "알 수 없는 이미지 업로드 오류";
+        console.error("[persistence] Supabase image upload failed. Screen update was cancelled.", error);
+        setPersistenceStatus({
+          phase: "error",
+          message: `화면 이미지 업로드에 실패해 수정을 중단했습니다. ${message}`,
+        });
+        return;
       }
     }
 
+    showNextSaveFeedbackRef.current = true;
     setAppState((state) => ({
       ...state,
       screens: state.screens.map((screen) =>
@@ -1363,12 +1567,102 @@ export function MultilingualTextMap() {
     setRegionDeleteTargetId(undefined);
   }
 
+  function reorderRegion(sourceRegionId: string, targetRegionId: string) {
+    if (sourceRegionId === targetRegionId) return;
+
+    const reorder = (regions: TextRegion[]) => {
+      const sourceIndex = regions.findIndex((region) => region.id === sourceRegionId);
+      const targetIndex = regions.findIndex((region) => region.id === targetRegionId);
+      if (sourceIndex < 0 || targetIndex < 0) return regions;
+
+      const nextRegions = [...regions];
+      const [movedRegion] = nextRegions.splice(sourceIndex, 1);
+      nextRegions.splice(targetIndex, 0, movedRegion);
+      return nextRegions;
+    };
+
+    recordRegionHistory(activeRegions);
+    setSelectedRegionId(sourceRegionId);
+
+    if (mode === "add") {
+      setDraftRegions((regions) => reorder(regions));
+      return;
+    }
+
+    const screenId = currentScreen?.id;
+    if (!screenId) return;
+
+    setAppState((state) => {
+      const reorderedScreenRegions = reorder(state.regions.filter((region) => region.screenId === screenId));
+      let screenRegionIndex = 0;
+
+      return {
+        ...state,
+        regions: state.regions.map((region) =>
+          region.screenId === screenId ? reorderedScreenRegions[screenRegionIndex++] : region,
+        ),
+      };
+    });
+  }
+
+  function insertTableOnlyRegion(insertIndex: number, anchor?: DialogAnchor) {
+    const now = new Date().toISOString();
+    const screenId = mode === "add" ? DRAFT_SCREEN_ID : currentScreen?.id;
+    if (!screenId) return;
+
+    const region: TextRegion = {
+      id: createId("region"),
+      screenId,
+      visibleText: "",
+      x: 0,
+      y: 0,
+      width: 0,
+      height: 0,
+      status: "unlinked",
+      memo: "",
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    const nextIndex = clamp(insertIndex, 0, activeRegions.length);
+    recordRegionHistory(activeRegions);
+    setSelectedRegionId(region.id);
+    setEditingCell(null);
+
+    if (mode === "add") {
+      setDraftRegions((regions) => {
+        const nextRegions = [...regions];
+        nextRegions.splice(nextIndex, 0, region);
+        return nextRegions;
+      });
+    } else {
+      setAppState((state) => {
+        const nextRegions = [...state.regions];
+        const screenRegionIndexes = nextRegions
+          .map((candidate, index) => (candidate.screenId === screenId ? index : -1))
+          .filter((index) => index >= 0);
+        const insertBeforeGlobalIndex = screenRegionIndexes[nextIndex];
+        const globalIndex = insertBeforeGlobalIndex ?? nextRegions.length;
+        nextRegions.splice(globalIndex, 0, region);
+
+        return {
+          ...state,
+          regions: nextRegions,
+        };
+      });
+    }
+
+    window.requestAnimationFrame(() => scrollTableRowIntoView(region.id));
+    openKeyDialog(region, anchor ?? { x: window.innerWidth - 420, y: 160 });
+  }
+
   function connectRegion(regionId: string, item: TranslationItem, options?: { closeDialog?: boolean }) {
     const region = activeRegions.find((candidate) => candidate.id === regionId);
 
     updateRegion(regionId, {
       translationItemId: item.id,
       translationOverrides: undefined,
+      translationOverrideHistory: undefined,
       visibleText: region?.visibleText || item.kr || item.en || item.key,
       status: region?.status === "unlinked" || region?.status === "needs_check" ? "linked" : region?.status,
     });
@@ -1384,8 +1678,24 @@ export function MultilingualTextMap() {
     connectRegion(selectedRegionId, item, options);
   }
 
+  function replaceRegionTranslationItem(regionId: string, item: TranslationItem) {
+    updateRegion(regionId, {
+      translationItemId: item.id,
+      translationOverrides: undefined,
+      translationOverrideHistory: undefined,
+    });
+    setSelectedRegionId(regionId);
+    setEditingCell(null);
+    setUpdateCandidateRegionId(undefined);
+  }
+
   function unlinkSelectedRegion() {
-    updateSelectedRegion({ translationItemId: undefined, translationOverrides: undefined, status: "unlinked" });
+    updateSelectedRegion({
+      translationItemId: undefined,
+      translationOverrides: undefined,
+      translationOverrideHistory: undefined,
+      status: "unlinked",
+    });
     setEditingCell(null);
   }
 
@@ -1397,6 +1707,62 @@ export function MultilingualTextMap() {
       displayValue: hasOverride ? (region.translationOverrides?.[languageCode] ?? "") : (item?.[languageCode] ?? ""),
       hasOverride,
     };
+  }
+
+  function scrollRegionIntoView(region: TextRegion) {
+    if (!isScreenRegion(region)) return;
+
+    const viewport = imageViewportRef.current;
+    const overlay = overlayRef.current;
+    const imageTarget = editableImage;
+    if (!viewport || !overlay || !imageTarget || viewport.clientHeight <= 0 || overlay.clientHeight <= 0) return;
+
+    const viewportRect = viewport.getBoundingClientRect();
+    const overlayRect = overlay.getBoundingClientRect();
+    const regionTop = overlayRect.top + (region.y / imageTarget.imageHeight) * overlayRect.height;
+    const regionHeight = (region.height / imageTarget.imageHeight) * overlayRect.height;
+    const regionBottom = regionTop + regionHeight;
+    const visibleTop = viewportRect.top + 8;
+    const visibleBottom = viewportRect.bottom - 8;
+    if (regionTop >= visibleTop && regionBottom <= visibleBottom) return;
+
+    const targetTop = viewport.scrollTop + regionTop - viewportRect.top - (viewport.clientHeight - regionHeight) / 2;
+    const maxScrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+
+    viewport.scrollTo({
+      top: clamp(targetTop, 0, maxScrollTop),
+      behavior: "smooth",
+    });
+  }
+
+  function scrollTableRowIntoView(regionId: string) {
+    const scrollContainer = translationTableWrapRef.current;
+    const row = itemRefs.current[regionId];
+    if (!scrollContainer || !row) return;
+
+    const header = scrollContainer.querySelector("thead");
+    const containerRect = scrollContainer.getBoundingClientRect();
+    const rowRect = row.getBoundingClientRect();
+    const headerHeight = header?.getBoundingClientRect().height ?? 0;
+    const targetTop = scrollContainer.scrollTop + rowRect.top - containerRect.top - headerHeight;
+    const maxScrollTop = Math.max(0, scrollContainer.scrollHeight - scrollContainer.clientHeight);
+
+    scrollContainer.scrollTo({
+      top: clamp(targetTop, 0, maxScrollTop),
+      behavior: "smooth",
+    });
+  }
+
+  function selectRegionFromScreen(region: TextRegion) {
+    setSelectedRegionId(region.id);
+    window.requestAnimationFrame(() => scrollTableRowIntoView(region.id));
+  }
+
+  function selectRegionFromTable(region: TextRegion) {
+    setSelectedRegionId(region.id);
+    if (!isScreenRegion(region)) return;
+
+    window.requestAnimationFrame(() => scrollRegionIntoView(region));
   }
 
   function beginCellEdit(region: TextRegion, item: TranslationItem | undefined, languageCode: LanguageCode) {
@@ -1414,7 +1780,27 @@ export function MultilingualTextMap() {
     const item = region?.translationItemId ? translationsById.get(region.translationItemId) : undefined;
     const baseValue = item?.[editingCell.languageCode] ?? "";
     const currentOverrides = region?.translationOverrides ?? {};
+    const currentValue = Object.prototype.hasOwnProperty.call(currentOverrides, editingCell.languageCode)
+      ? (currentOverrides[editingCell.languageCode] ?? "")
+      : baseValue;
+    if (editingCellValue === currentValue) {
+      setEditingCell(null);
+      return;
+    }
+
     const nextOverrides = { ...currentOverrides };
+    const currentHistory = region?.translationOverrideHistory ?? {};
+    const hasCurrentLanguageHistory = Object.prototype.hasOwnProperty.call(currentHistory, editingCell.languageCode);
+    const currentLanguageHistory = hasCurrentLanguageHistory
+      ? (currentHistory[editingCell.languageCode] ?? [])
+      : currentValue !== baseValue
+        ? [baseValue]
+        : [];
+    const nextLanguageHistory = [...currentLanguageHistory, currentValue];
+    const nextHistory = {
+      ...currentHistory,
+      [editingCell.languageCode]: nextLanguageHistory,
+    };
 
     if (editingCellValue === baseValue) {
       delete nextOverrides[editingCell.languageCode];
@@ -1424,6 +1810,7 @@ export function MultilingualTextMap() {
 
     updateRegion(editingCell.regionId, {
       translationOverrides: Object.keys(nextOverrides).length > 0 ? nextOverrides : undefined,
+      translationOverrideHistory: nextHistory,
     });
     setEditingCell(null);
   }
@@ -1516,6 +1903,7 @@ export function MultilingualTextMap() {
         visibleText: "",
         translationItemId: undefined,
         translationOverrides: undefined,
+        translationOverrideHistory: undefined,
         status: "unlinked",
         memo: "",
         createdAt: now,
@@ -1592,7 +1980,7 @@ export function MultilingualTextMap() {
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img src={currentScreen.imageUrl} alt={currentScreen.name} />
         <div ref={overlayRef} className="region-layer" onPointerDown={startDrawing}>
-          {regionsForScreen.map((region) => {
+          {regionsForScreen.filter(isScreenRegion).map((region) => {
             const linked = Boolean(region.translationItemId);
             const selected = region.id === selectedRegionId;
 
@@ -1625,7 +2013,7 @@ export function MultilingualTextMap() {
                     }
                     return;
                   }
-                  setSelectedRegionId(region.id);
+                  selectRegionFromScreen(region);
                 }}
                 aria-label={region.visibleText || "텍스트 영역"}
                 title={region.visibleText || "텍스트 영역"}
@@ -1663,7 +2051,7 @@ export function MultilingualTextMap() {
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img src={imageDraft.imageUrl} alt={screenForm.name || imageDraft.fileName} />
         <div ref={overlayRef} className="region-layer" onPointerDown={startDrawing}>
-          {draftRegions.map((region) => {
+          {draftRegions.filter(isScreenRegion).map((region) => {
             const linked = Boolean(region.translationItemId);
             const selected = region.id === selectedRegionId;
 
@@ -1714,12 +2102,34 @@ export function MultilingualTextMap() {
   }
 
   function renderTranslationTable() {
+    const canReorderRows = isEditing;
+
+    const renderInsertControl = (insertIndex: number, position: "before" | "after" = "before") => {
+      if (!canReorderRows) return null;
+
+      return (
+        <button
+          type="button"
+          className={`translation-row-insert-button translation-row-insert-${position}`}
+          onClick={(event) => {
+            event.stopPropagation();
+            insertTableOnlyRegion(insertIndex, { x: event.clientX + 12, y: event.clientY + 12 });
+          }}
+          aria-label={`${insertIndex + 1}번째 위치에 Row 추가`}
+          title="여기에 Row 추가"
+        >
+          <span aria-hidden="true">+</span>
+        </button>
+      );
+    };
+
     return (
-      <div className="translation-table-wrap">
+      <div className="translation-table-wrap" ref={translationTableWrapRef}>
         {filteredRegions.length > 0 ? (
           <table className="translation-matrix">
             <thead>
               <tr>
+                {canReorderRows ? <th className="translation-order-head" aria-label="순서 변경" /> : null}
                 {LANGUAGE_DEFS.map((language) => (
                   <th key={language.code}>{language.label}</th>
                 ))}
@@ -1727,9 +2137,11 @@ export function MultilingualTextMap() {
               </tr>
             </thead>
             <tbody>
-              {filteredRegions.map((region) => {
+              {filteredRegions.map((region, index) => {
                 const item = region.translationItemId ? translationsById.get(region.translationItemId) : undefined;
                 const selected = region.id === selectedRegionId;
+                const activeRegionIndex = activeRegions.findIndex((candidate) => candidate.id === region.id);
+                const insertIndex = activeRegionIndex >= 0 ? activeRegionIndex : index;
 
                 return (
                   <tr
@@ -1738,81 +2150,179 @@ export function MultilingualTextMap() {
                     ref={(element) => {
                       itemRefs.current[region.id] = element;
                     }}
-                    className={selected ? "selected" : ""}
-                    onClick={() => setSelectedRegionId(region.id)}
+                    className={`translation-data-row ${selected ? "selected" : ""} ${
+                      draggedRegionId === region.id ? "dragging" : ""
+                    } ${dragOverRegionId === region.id ? "drop-target" : ""}`}
+                    onClick={() => selectRegionFromTable(region)}
+                    onDragOver={(event) => {
+                      if (!canReorderRows || !draggedRegionId || draggedRegionId === region.id) return;
+                      event.preventDefault();
+                      event.dataTransfer.dropEffect = "move";
+                      setDragOverRegionId(region.id);
+                    }}
+                    onDragLeave={() => {
+                      if (dragOverRegionId === region.id) setDragOverRegionId(undefined);
+                    }}
+                    onDrop={(event) => {
+                      if (!canReorderRows || !draggedRegionId) return;
+                      event.preventDefault();
+                      reorderRegion(draggedRegionId, region.id);
+                      setDraggedRegionId(undefined);
+                      setDragOverRegionId(undefined);
+                    }}
                   >
-                    {LANGUAGE_DEFS.map((language) => {
-                      const { displayValue, hasOverride } = getCellValue(region, item, language.code);
-                      const isCellEditing =
-                        editingCell?.regionId === region.id && editingCell.languageCode === language.code;
+                    {canReorderRows ? (
+                      <td className="translation-order-cell">
+                        {renderInsertControl(insertIndex)}
+                        {index === filteredRegions.length - 1
+                          ? renderInsertControl(activeRegions.length, "after")
+                          : null}
+                          <button
+                            type="button"
+                            className="translation-drag-handle"
+                            draggable
+                            title="드래그해서 순서 변경"
+                            aria-label="드래그해서 순서 변경"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              selectRegionFromTable(region);
+                            }}
+                            onDoubleClick={(event) => event.stopPropagation()}
+                            onDragStart={(event) => {
+                              event.stopPropagation();
+                              setDraggedRegionId(region.id);
+                              setDragOverRegionId(undefined);
+                              event.dataTransfer.effectAllowed = "move";
+                              event.dataTransfer.setData("text/plain", region.id);
+                            }}
+                            onDragEnd={() => {
+                              setDraggedRegionId(undefined);
+                              setDragOverRegionId(undefined);
+                            }}
+                          />
+                      </td>
+                    ) : null}
+                      {LANGUAGE_DEFS.map((language) => {
+                        const { baseValue, displayValue, hasOverride } = getCellValue(region, item, language.code);
+                        const updateCandidates = item ? (updateCandidatesByItemId.get(item.id) ?? []) : [];
+                        const isCellEditing =
+                          editingCell?.regionId === region.id && editingCell.languageCode === language.code;
+                        const editHistory =
+                          region.translationOverrideHistory?.[language.code] ??
+                          (baseValue ? [baseValue] : ["기존 문구 없음"]);
 
-                      return (
-                        <td
-                          key={language.code}
-                          className={`${!displayValue ? "missing" : ""} ${hasOverride ? "modified" : ""} ${
-                            isCellEditing ? "editing" : ""
-                          }`}
-                          onDoubleClick={(event) => {
-                            event.stopPropagation();
-                            beginCellEdit(region, item, language.code);
-                          }}
-                        >
-                          {isCellEditing ? (
-                            <textarea
-                              autoFocus
-                              className="translation-cell-editor"
-                              value={editingCellValue}
-                              onChange={(event) => setEditingCellValue(event.target.value)}
-                              onClick={(event) => event.stopPropagation()}
-                              onDoubleClick={(event) => event.stopPropagation()}
-                              onBlur={commitCellEdit}
-                              onKeyDown={(event) => {
-                                if (event.key === "Escape") {
-                                  event.preventDefault();
-                                  cancelCellEdit();
-                                  return;
-                                }
+                        return (
+                          <td
+                            key={language.code}
+                            className={`${!displayValue ? "missing" : ""} ${hasOverride ? "modified" : ""} ${
+                              isCellEditing ? "editing" : ""
+                            }`}
+                            onDoubleClick={(event) => {
+                              event.stopPropagation();
+                              beginCellEdit(region, item, language.code);
+                            }}
+                          >
+                            {isCellEditing ? (
+                              <textarea
+                                autoFocus
+                                className="translation-cell-editor"
+                                value={editingCellValue}
+                                onChange={(event) => setEditingCellValue(event.target.value)}
+                                onClick={(event) => event.stopPropagation()}
+                                onDoubleClick={(event) => event.stopPropagation()}
+                                onBlur={commitCellEdit}
+                                onKeyDown={(event) => {
+                                  if (event.key === "Escape") {
+                                    event.preventDefault();
+                                    cancelCellEdit();
+                                    return;
+                                  }
 
-                                if (event.key === "Enter" && !event.shiftKey) {
-                                  event.preventDefault();
-                                  commitCellEdit();
-                                }
-                              }}
-                            />
-                          ) : (
-                            <>
-                              <span className="translation-cell-value">{displayValue || "미연결"}</span>
-                              {hasOverride ? <span className="translation-modified-tag">수정됨</span> : null}
-                            </>
-                          )}
-                        </td>
-                      );
-                    })}
-                    <td className="translation-note-cell">
-                      {mode === "add" ? (
-                        <textarea
-                          className="translation-note-editor"
-                          value={region.memo}
-                          onChange={(event) => updateRegion(region.id, { memo: event.target.value })}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            setSelectedRegionId(region.id);
-                          }}
-                          onDoubleClick={(event) => event.stopPropagation()}
-                          placeholder="비고 입력"
-                          aria-label="비고 입력"
-                        />
-                      ) : (
-                        <span className={region.memo ? "translation-note-value" : "translation-note-value empty"}>
-                          {region.memo || "-"}
-                        </span>
-                      )}
-                    </td>
+                                  if (event.key === "Enter" && !event.shiftKey) {
+                                    event.preventDefault();
+                                    commitCellEdit();
+                                  }
+                                }}
+                              />
+                            ) : (
+                              <>
+                                <span className="translation-cell-value">{displayValue || "미연결"}</span>
+                                {language.code === "kr" && updateCandidates.length > 0 ? (
+                                  <button
+                                    type="button"
+                                    className="translation-update-candidate-button"
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      setUpdateCandidateRegionId(region.id);
+                                    }}
+                                    onDoubleClick={(event) => event.stopPropagation()}
+                                  >
+                                    <span aria-hidden="true" />
+                                    업데이트 후보 있음
+                                  </button>
+                                ) : null}
+                                {hasOverride ? (
+                                  <span
+                                    className="translation-modified-tag"
+                                    aria-label={`${language.label} 이전 기록: ${editHistory.join(", ")}`}
+                                    tabIndex={0}
+                                  >
+                                    수정됨
+                                    <span className="translation-modified-tooltip" role="tooltip">
+                                      <span className="translation-modified-tooltip-label">이전 기록</span>
+                                      <span className="translation-modified-tooltip-list">
+                                        {editHistory.map((historyValue, historyIndex) => (
+                                          <span className="translation-modified-tooltip-item" key={historyIndex}>
+                                            <span className="translation-modified-tooltip-index">
+                                              {historyIndex + 1}
+                                            </span>
+                                            <span className="translation-modified-tooltip-value">
+                                              {historyValue || "기존 문구 없음"}
+                                            </span>
+                                          </span>
+                                        ))}
+                                      </span>
+                                    </span>
+                                  </span>
+                                ) : null}
+                              </>
+                            )}
+                          </td>
+                        );
+                      })}
+                      <td className="translation-note-cell">
+                        {isEditing ? (
+                          <textarea
+                            className="translation-note-editor"
+                            value={region.memo}
+                            onChange={(event) => updateRegion(region.id, { memo: event.target.value })}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              setSelectedRegionId(region.id);
+                            }}
+                            onDoubleClick={(event) => event.stopPropagation()}
+                            placeholder="비고 입력"
+                            aria-label="비고 입력"
+                          />
+                        ) : (
+                          <span className={region.memo ? "translation-note-value" : "translation-note-value empty"}>
+                            {region.memo || "-"}
+                          </span>
+                        )}
+                      </td>
                   </tr>
                 );
               })}
             </tbody>
           </table>
+        ) : canReorderRows ? (
+          <button
+            type="button"
+            className="translation-empty-insert-button"
+            onClick={(event) => insertTableOnlyRegion(0, { x: event.clientX + 12, y: event.clientY + 12 })}
+          >
+            Row 추가
+          </button>
         ) : null}
         {filteredRegions.length === 0 ? (
           <div className="empty-list">이 조건에 맞는 텍스트 영역이 없습니다.</div>
@@ -2133,6 +2643,128 @@ export function MultilingualTextMap() {
     );
   }
 
+  function renderUpdateCandidateDialog() {
+    if (!updateCandidateRegionId) return null;
+
+    const region = activeRegions.find((candidate) => candidate.id === updateCandidateRegionId);
+    const currentItem = region?.translationItemId ? translationsById.get(region.translationItemId) : undefined;
+    const candidates = currentItem ? (updateCandidatesByItemId.get(currentItem.id) ?? []) : [];
+
+    if (!region || !currentItem || candidates.length === 0) return null;
+
+    return (
+      <div
+        className="update-candidate-modal-backdrop"
+        role="presentation"
+        onClick={() => setUpdateCandidateRegionId(undefined)}
+      >
+        <section
+          className="update-candidate-modal"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="update-candidate-modal-title"
+          onClick={(event) => event.stopPropagation()}
+        >
+          <header className="update-candidate-modal-head">
+            <div>
+              <h2 id="update-candidate-modal-title">업데이트 후보</h2>
+              <p>동일 key의 최신 번역 소스가 있습니다. 교체 전까지 기존 연결은 유지됩니다.</p>
+            </div>
+            <button
+              type="button"
+              className="update-candidate-modal-close"
+              onClick={() => setUpdateCandidateRegionId(undefined)}
+              aria-label="업데이트 후보 닫기"
+            >
+              ×
+            </button>
+          </header>
+
+          <div className="update-candidate-current">
+            <span>현재 연결</span>
+            <strong>{currentItem.key}</strong>
+            <em>{sourceById.get(currentItem.sourceId)?.fileName ?? "알 수 없는 소스"}</em>
+          </div>
+
+          <div className="update-candidate-list">
+            {candidates.map((candidate) => {
+              const source = sourceById.get(candidate.sourceId);
+
+              return (
+                <article className="update-candidate-item" key={candidate.id}>
+                  <div className="update-candidate-item-head">
+                    <div>
+                      <span>동일 key 최신 소스 존재</span>
+                      <strong>{candidate.key}</strong>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => replaceRegionTranslationItem(region.id, candidate)}
+                    >
+                      이 항목으로 교체
+                    </button>
+                  </div>
+                  <dl>
+                    <div>
+                      <dt>KR</dt>
+                      <dd>{candidate.kr || "-"}</dd>
+                    </div>
+                    <div>
+                      <dt>EN</dt>
+                      <dd>{candidate.en || "-"}</dd>
+                    </div>
+                    <div>
+                      <dt>source</dt>
+                      <dd>{source?.fileName ?? "알 수 없는 소스"}</dd>
+                    </div>
+                    <div>
+                      <dt>importedAt</dt>
+                      <dd>{formatImportedAt(source ? getSourceImportedAt(source) : candidate.createdAt)}</dd>
+                    </div>
+                  </dl>
+                </article>
+              );
+            })}
+          </div>
+        </section>
+      </div>
+    );
+  }
+
+  function renderPersistenceStatus(placement: "floating" | "header" = "floating") {
+    if (persistenceStatus.phase === "ready") return null;
+
+    const canRetrySave = isLoaded && persistenceStatus.recovery === "save";
+    const shouldReload = isLoaded && persistenceStatus.recovery === "reload";
+
+    return (
+      <div
+        className={`persistence-status persistence-status-${persistenceStatus.phase} persistence-status-${placement}`}
+        role={persistenceStatus.phase === "error" ? "alert" : "status"}
+        aria-live="polite"
+      >
+        <span className="persistence-status-indicator" aria-hidden="true" />
+        <span>{persistenceStatus.message}</span>
+        {canRetrySave ? (
+          <button
+            type="button"
+            onClick={() => {
+              showNextSaveFeedbackRef.current = true;
+              setPersistenceRetryVersion((version) => version + 1);
+            }}
+          >
+            다시 저장
+          </button>
+        ) : null}
+        {shouldReload ? (
+          <button type="button" onClick={() => window.location.reload()}>
+            다시 불러오기
+          </button>
+        ) : null}
+      </div>
+    );
+  }
+
   function renderDeleteConfirmDialog() {
     if (!deleteTarget) return null;
 
@@ -2245,7 +2877,12 @@ export function MultilingualTextMap() {
           <h1>{isEditMode ? "화면 수정" : "화면 추가"}</h1>
         </div>
 
-        <section className={`add-screen-pane ${hasScreenImage ? "has-image" : ""}`}>
+        <section
+          ref={(element) => {
+            imageViewportRef.current = element;
+          }}
+          className={`add-screen-pane ${hasScreenImage ? "has-image" : ""}`}
+        >
           {imageDraft ? (
             renderAddScreenPreview()
           ) : isEditMode && currentScreen ? (
@@ -2372,20 +3009,37 @@ export function MultilingualTextMap() {
           <div className="brand-block">
             <h1>TG 다국어 위키</h1>
           </div>
-          <button type="button" className="translation-source-button" onClick={() => setSourceDialogOpen(true)}>
-            번역 데이터 관리
-          </button>
+          <div className="topbar-actions">
+            {renderPersistenceStatus("header")}
+            <button type="button" className="translation-source-button" onClick={() => setSourceDialogOpen(true)}>
+              번역 데이터 관리
+            </button>
+          </div>
         </header>
       ) : null}
 
-      {mode === "view" ? (
+      {mode !== "view" ? renderPersistenceStatus() : null}
+
+      {!isLoaded ? (
+        <section className="persistence-loading-view" aria-label="저장 데이터 로드 중">
+          <span aria-hidden="true" />
+          <strong>저장 데이터를 불러오는 중입니다.</strong>
+        </section>
+      ) : mode === "view" ? (
         <section className="view-workspace">
           {currentScreen ? (
             <>
               {renderViewSidebar()}
 
               <section className="canvas-panel">
-                <div className="image-stage">{renderScreenImage()}</div>
+                <div
+                  ref={(element) => {
+                    imageViewportRef.current = element;
+                  }}
+                  className="image-stage"
+                >
+                  {renderScreenImage()}
+                </div>
               </section>
 
               <aside className="translation-panel">
@@ -2582,7 +3236,12 @@ export function MultilingualTextMap() {
                 <p>이미지 위 빈 영역을 드래그해 새 영역을 만들고, 기존 영역을 선택해 수정합니다.</p>
               </div>
             </div>
-            <div className={`image-stage ${isEditing && editableImage ? "is-drawing" : ""}`}>
+            <div
+              ref={(element) => {
+                imageViewportRef.current = element;
+              }}
+              className={`image-stage ${isEditing && editableImage ? "is-drawing" : ""}`}
+            >
               {currentScreen ? (
                 renderScreenImage()
               ) : (
@@ -2647,6 +3306,7 @@ export function MultilingualTextMap() {
       )}
       {renderKeyDialog()}
       {renderTranslationSourceDialog()}
+      {renderUpdateCandidateDialog()}
       {renderDeleteConfirmDialog()}
       {renderRegionDeleteConfirmDialog()}
       {renderAddLeaveConfirmDialog()}
