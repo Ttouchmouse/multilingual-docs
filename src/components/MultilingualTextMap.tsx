@@ -103,6 +103,15 @@ type DeleteTarget =
   | { type: "group"; name: string }
   | { type: "screen"; screenId: string; name: string };
 
+type GlobalSearchMatch = {
+  id: string;
+  screen: Screen;
+  region: TextRegion;
+  item?: TranslationItem;
+  fieldLabel: string;
+  value: string;
+};
+
 type RegionOcrState = {
   status: "idle" | "running" | "success" | "failed";
   confidence?: number;
@@ -389,6 +398,9 @@ export function MultilingualTextMap() {
   const [regionDeleteTargetId, setRegionDeleteTargetId] = useState<string>();
   const [addLeaveConfirmOpen, setAddLeaveConfirmOpen] = useState(false);
   const [sourceDialogOpen, setSourceDialogOpen] = useState(false);
+  const [globalSearchQuery, setGlobalSearchQuery] = useState("");
+  const [globalSearchOpen, setGlobalSearchOpen] = useState(false);
+  const [pendingGlobalFocusRegionId, setPendingGlobalFocusRegionId] = useState<string>();
   const [updateCandidateRegionId, setUpdateCandidateRegionId] = useState<string>();
   const [ocrByRegion, setOcrByRegion] = useState<Record<string, RegionOcrState>>({});
   const [persistenceStatus, setPersistenceStatus] = useState<PersistenceStatus>({
@@ -401,6 +413,7 @@ export function MultilingualTextMap() {
   const imageViewportRef = useRef<HTMLElement | null>(null);
   const imageFileInputRef = useRef<HTMLInputElement>(null);
   const translationFileInputRef = useRef<HTMLInputElement>(null);
+  const globalSearchRef = useRef<HTMLDivElement>(null);
   const translationTableWrapRef = useRef<HTMLDivElement>(null);
   const itemRefs = useRef<Record<string, HTMLElement | null>>({});
   const defaultDataLoadAttempted = useRef(false);
@@ -439,6 +452,9 @@ export function MultilingualTextMap() {
     [enabledSourceIds, translations],
   );
   const currentScreen = appState.screens.find((screen) => screen.id === appState.activeScreenId);
+  const screenById = useMemo(() => {
+    return new Map(appState.screens.map((screen) => [screen.id, screen]));
+  }, [appState.screens]);
   const groupedScreens = useMemo(() => {
     const groups = new Map<string, Screen[]>();
 
@@ -488,6 +504,52 @@ export function MultilingualTextMap() {
   const translationsById = useMemo(() => {
     return new Map(translations.map((item) => [item.id, item]));
   }, [translations]);
+  const globalSearchMatches = useMemo<GlobalSearchMatch[]>(() => {
+    const query = globalSearchQuery.trim().toLowerCase();
+    if (!query) return [];
+
+    const matches: GlobalSearchMatch[] = [];
+
+    for (const region of appState.regions) {
+      const screen = screenById.get(region.screenId);
+      if (!screen) continue;
+
+      const item = region.translationItemId ? translationsById.get(region.translationItemId) : undefined;
+      const fields: Array<{ label: string; value: string }> = [
+        { label: "화면 텍스트", value: region.visibleText },
+        { label: "비고", value: region.memo },
+      ];
+
+      if (item) {
+        fields.push({ label: "key", value: item.key });
+        for (const language of LANGUAGE_DEFS) {
+          fields.push({
+            label: language.label,
+            value: getCellValue(region, item, language.code).displayValue,
+          });
+        }
+      }
+
+      const seenFields = new Set<string>();
+      for (const field of fields) {
+        const value = field.value.trim();
+        if (!value || !value.toLowerCase().includes(query)) continue;
+        const fieldKey = `${region.id}:${field.label}:${value}`;
+        if (seenFields.has(fieldKey)) continue;
+        seenFields.add(fieldKey);
+        matches.push({
+          id: fieldKey,
+          screen,
+          region,
+          item,
+          fieldLabel: field.label,
+          value,
+        });
+      }
+    }
+
+    return matches.slice(0, 80);
+  }, [appState.regions, globalSearchQuery, screenById, translationsById]);
   const updateCandidatesByItemId = useMemo(() => {
     const itemsByKey = new Map<string, TranslationItem[]>();
     const candidatesByItemId = new Map<string, TranslationItem[]>();
@@ -914,6 +976,33 @@ export function MultilingualTextMap() {
     if (!selectedRegionId) return;
     window.requestAnimationFrame(() => scrollTableRowIntoView(selectedRegionId));
   }, [selectedRegionId]);
+
+  useEffect(() => {
+    if (!globalSearchOpen) return;
+
+    const onPointerDown = (event: PointerEvent) => {
+      if (globalSearchRef.current?.contains(event.target as Node)) return;
+      setGlobalSearchOpen(false);
+    };
+
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, [globalSearchOpen]);
+
+  useEffect(() => {
+    if (!pendingGlobalFocusRegionId || selectedRegionId !== pendingGlobalFocusRegionId) return;
+
+    const region = activeRegions.find((candidate) => candidate.id === pendingGlobalFocusRegionId);
+    if (!region) return;
+
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        scrollTableRowIntoView(region.id);
+        scrollRegionIntoView(region);
+        setPendingGlobalFocusRegionId(undefined);
+      });
+    });
+  }, [activeRegions, pendingGlobalFocusRegionId, selectedRegionId]);
 
   useEffect(() => {
     if (!isEditing || !selectedRegionId || keyDialogRegionId || regionDeleteTargetId) return;
@@ -1817,6 +1906,108 @@ export function MultilingualTextMap() {
     if (!isScreenRegion(region)) return;
 
     window.requestAnimationFrame(() => scrollRegionIntoView(region));
+  }
+
+  function selectGlobalSearchMatch(match: GlobalSearchMatch) {
+    setMode("view");
+    setGlobalSearchOpen(false);
+    setPendingGlobalFocusRegionId(match.region.id);
+    setSelectedRegionId(match.region.id);
+    setOpenGroups((groups) => ({ ...groups, [getScreenGroup(match.screen)]: true }));
+    setAppState((state) =>
+      state.activeScreenId === match.screen.id
+        ? state
+        : {
+            ...state,
+            activeScreenId: match.screen.id,
+          },
+    );
+  }
+
+  function renderHighlightedSearchValue(value: string) {
+    const query = globalSearchQuery.trim();
+    if (!query) return value;
+
+    const lowerValue = value.toLowerCase();
+    const lowerQuery = query.toLowerCase();
+    const index = lowerValue.indexOf(lowerQuery);
+    if (index < 0) return value;
+
+    return (
+      <>
+        {value.slice(0, index)}
+        <mark>{value.slice(index, index + query.length)}</mark>
+        {value.slice(index + query.length)}
+      </>
+    );
+  }
+
+  function renderGlobalSearch() {
+    const query = globalSearchQuery.trim();
+    const showResults = globalSearchOpen && query.length > 0;
+
+    return (
+      <div className="global-search" ref={globalSearchRef}>
+        <label className={`global-search-field ${globalSearchOpen ? "focused" : ""} ${query ? "typed" : ""}`}>
+          <span className="global-search-icon" aria-hidden="true" />
+          <input
+            value={globalSearchQuery}
+            onChange={(event) => {
+              setGlobalSearchQuery(event.target.value);
+              setGlobalSearchOpen(true);
+            }}
+            onFocus={() => setGlobalSearchOpen(true)}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                event.preventDefault();
+                setGlobalSearchOpen(false);
+              }
+            }}
+            placeholder="텍스트 검색"
+          />
+          {query ? (
+            <button
+              type="button"
+              className="global-search-clear"
+              onClick={() => {
+                setGlobalSearchQuery("");
+                setGlobalSearchOpen(false);
+              }}
+              aria-label="검색어 지우기"
+            />
+          ) : null}
+        </label>
+
+        {showResults ? (
+          <div className="global-search-popover" role="listbox" aria-label="텍스트 검색 결과">
+            <div className="global-search-summary">
+              <strong>{globalSearchMatches.length.toLocaleString()}개 결과</strong>
+              <span>매칭된 텍스트만 표시됩니다.</span>
+            </div>
+            <div className="global-search-results">
+              {globalSearchMatches.length > 0 ? (
+                globalSearchMatches.map((match) => (
+                  <button
+                    type="button"
+                    key={match.id}
+                    className="global-search-result"
+                    onClick={() => selectGlobalSearchMatch(match)}
+                  >
+                    <span className="global-search-result-meta">
+                      {getScreenGroup(match.screen)} · {match.screen.name} · {match.fieldLabel}
+                    </span>
+                    <strong>{renderHighlightedSearchValue(match.value)}</strong>
+                    <em>{match.item?.key ?? "미연결 Row"}</em>
+                  </button>
+                ))
+              ) : (
+                <div className="global-search-empty">검색 결과가 없습니다.</div>
+              )}
+            </div>
+          </div>
+        ) : null}
+      </div>
+    );
   }
 
   function beginCellEdit(region: TextRegion, item: TranslationItem | undefined, languageCode: LanguageCode) {
@@ -3073,6 +3264,7 @@ export function MultilingualTextMap() {
           </div>
           <div className="topbar-actions">
             {renderPersistenceStatus("header")}
+            {renderGlobalSearch()}
             <button type="button" className="translation-source-button" onClick={() => setSourceDialogOpen(true)}>
               번역 데이터 관리
             </button>
