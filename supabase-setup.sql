@@ -9,7 +9,22 @@ create table if not exists public.app_snapshots (
   updated_at timestamptz not null default now()
 );
 
+create table if not exists public.app_snapshot_backups (
+  id text primary key,
+  snapshot_id text not null,
+  owner_id uuid null,
+  app_state jsonb not null default '{}'::jsonb,
+  translations jsonb not null default '[]'::jsonb,
+  snapshot_updated_at timestamptz null,
+  reason text not null default 'auto_before_save',
+  created_at timestamptz not null default now()
+);
+
+create index if not exists app_snapshot_backups_snapshot_created_idx
+on public.app_snapshot_backups (snapshot_id, created_at desc);
+
 alter table public.app_snapshots enable row level security;
+alter table public.app_snapshot_backups enable row level security;
 
 drop policy if exists "mvp anon read app snapshots" on public.app_snapshots;
 create policy "mvp anon read app snapshots"
@@ -24,6 +39,20 @@ on public.app_snapshots
 for all
 to anon
 using (true)
+with check (true);
+
+drop policy if exists "mvp anon read app snapshot backups" on public.app_snapshot_backups;
+create policy "mvp anon read app snapshot backups"
+on public.app_snapshot_backups
+for select
+to anon
+using (true);
+
+drop policy if exists "mvp anon insert app snapshot backups" on public.app_snapshot_backups;
+create policy "mvp anon insert app snapshot backups"
+on public.app_snapshot_backups
+for insert
+to anon
 with check (true);
 
 insert into storage.buckets (id, name, public)

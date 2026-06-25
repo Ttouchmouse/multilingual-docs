@@ -29,11 +29,13 @@ NEXT_PUBLIC_SUPABASE_STORAGE_BUCKET=screen-images
 ## 데이터 저장 정책
 
 - 원본 데이터: Supabase `public.app_snapshots` 테이블의 `id = default`
-- 화면 이미지: Supabase Storage `screen-images` bucket
+- 자동 백업: Supabase `public.app_snapshot_backups` 테이블에 저장 직전 스냅샷을 최대 10분 간격으로 기록합니다.
+- 화면 이미지: Supabase Storage `screen-images` bucket. 새 이미지 업로드/교체 시 기존 파일을 덮어쓰지 않고 화면별 timestamp 경로로 저장합니다.
 - 로컬 캐시: IndexedDB
 - 로드 순서: Supabase 성공 시 해당 데이터를 사용하고 IndexedDB 캐시를 갱신합니다. Supabase 로드 실패 또는 데이터가 없을 때만 IndexedDB를 fallback으로 읽습니다.
 - 저장 순서: Supabase 저장이 성공한 뒤에만 동일 스냅샷을 IndexedDB 캐시에 기록합니다.
 - Supabase 저장 실패 시 IndexedDB에 새 상태를 기록하지 않으며 앱 화면에 오류와 재시도 버튼을 표시합니다.
+- 백업 실패는 기본 저장을 막지 않습니다. 백업 테이블이 없다면 콘솔에 안내를 남기고 기존 저장 흐름을 유지합니다.
 
 ## MVP 사용 흐름
 

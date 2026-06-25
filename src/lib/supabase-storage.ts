@@ -3,10 +3,21 @@ import { supabase, SUPABASE_BUCKET } from "./supabase";
 
 const SNAPSHOT_ID = "default";
 const SNAPSHOT_TABLE = "app_snapshots";
+const SNAPSHOT_BACKUP_TABLE = "app_snapshot_backups";
+const SNAPSHOT_BACKUP_INTERVAL_MS = 10 * 60 * 1000;
+
+let nextSnapshotBackupCheckAt = 0;
+let snapshotBackupTableUnavailable = false;
 
 type PersistedPayload = {
   app_state: AppState;
   translations: TranslationItem[];
+};
+
+type PersistedRow = PersistedPayload & {
+  id: string;
+  owner_id: string | null;
+  updated_at: string;
 };
 
 type SupabaseErrorDetails = {
@@ -57,6 +68,18 @@ function getImageExtension(dataUrl: string) {
   return "jpg";
 }
 
+function getStorageSafeTimestamp() {
+  return new Date().toISOString().replace(/[:.]/g, "-");
+}
+
+function getBackupId(timestamp: string) {
+  const suffix = typeof crypto !== "undefined" && "randomUUID" in crypto
+    ? crypto.randomUUID()
+    : Math.random().toString(36).slice(2);
+
+  return `${SNAPSHOT_ID}_${timestamp}_${suffix}`;
+}
+
 export async function loadSupabaseSnapshot() {
   if (!supabase) {
     console.info("[persistence] Supabase is not configured. Skipping cloud snapshot load.");
@@ -102,6 +125,90 @@ export async function loadSupabaseSnapshot() {
   };
 }
 
+async function backupCurrentSnapshotIfDue() {
+  if (!supabase || snapshotBackupTableUnavailable) return;
+
+  const now = Date.now();
+  if (now < nextSnapshotBackupCheckAt) return;
+
+  try {
+    const { data: latestBackup, error: latestBackupError } = await supabase
+      .from(SNAPSHOT_BACKUP_TABLE)
+      .select("created_at")
+      .eq("snapshot_id", SNAPSHOT_ID)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle<{ created_at: string }>();
+
+    if (latestBackupError) {
+      throw latestBackupError;
+    }
+
+    const latestBackupAt = latestBackup?.created_at ? new Date(latestBackup.created_at).getTime() : 0;
+    if (latestBackupAt && now - latestBackupAt < SNAPSHOT_BACKUP_INTERVAL_MS) {
+      nextSnapshotBackupCheckAt = latestBackupAt + SNAPSHOT_BACKUP_INTERVAL_MS;
+      console.info("[persistence] Snapshot backup skipped because a recent backup already exists.", {
+        table: SNAPSHOT_BACKUP_TABLE,
+        snapshotId: SNAPSHOT_ID,
+        latestBackupAt: latestBackup?.created_at,
+      });
+      return;
+    }
+
+    const { data: currentSnapshot, error: currentSnapshotError } = await supabase
+      .from(SNAPSHOT_TABLE)
+      .select("id, owner_id, app_state, translations, updated_at")
+      .eq("id", SNAPSHOT_ID)
+      .maybeSingle<PersistedRow>();
+
+    if (currentSnapshotError) {
+      throw currentSnapshotError;
+    }
+
+    if (!currentSnapshot) {
+      nextSnapshotBackupCheckAt = now + SNAPSHOT_BACKUP_INTERVAL_MS;
+      console.info("[persistence] Snapshot backup skipped because the source snapshot does not exist yet.", {
+        table: SNAPSHOT_TABLE,
+        id: SNAPSHOT_ID,
+      });
+      return;
+    }
+
+    const backupCreatedAt = new Date().toISOString();
+    const { error: insertError } = await supabase.from(SNAPSHOT_BACKUP_TABLE).insert({
+      id: getBackupId(getStorageSafeTimestamp()),
+      snapshot_id: currentSnapshot.id,
+      owner_id: currentSnapshot.owner_id,
+      app_state: currentSnapshot.app_state,
+      translations: currentSnapshot.translations ?? [],
+      snapshot_updated_at: currentSnapshot.updated_at,
+      reason: "auto_before_save",
+      created_at: backupCreatedAt,
+    });
+
+    if (insertError) {
+      throw insertError;
+    }
+
+    nextSnapshotBackupCheckAt = now + SNAPSHOT_BACKUP_INTERVAL_MS;
+    console.info("[persistence] Snapshot backup saved before overwriting default snapshot.", {
+      table: SNAPSHOT_BACKUP_TABLE,
+      snapshotId: SNAPSHOT_ID,
+      createdAt: backupCreatedAt,
+    });
+  } catch (error) {
+    const errorDetails = getSupabaseErrorDetails(error);
+    if (errorDetails.code === "42P01") {
+      snapshotBackupTableUnavailable = true;
+      console.warn("[persistence] Snapshot backup table is missing. Run supabase-setup.sql to enable automatic backups.", errorDetails);
+      return;
+    }
+
+    nextSnapshotBackupCheckAt = now + SNAPSHOT_BACKUP_INTERVAL_MS;
+    console.warn("[persistence] Snapshot backup failed. Continuing primary save.", errorDetails);
+  }
+}
+
 async function performSupabaseSnapshotSave(
   appState: AppState,
   translations: TranslationItem[],
@@ -118,6 +225,8 @@ async function performSupabaseSnapshotSave(
     sources: appState.sources?.length ?? 0,
     translations: translations.length,
   });
+
+  await backupCurrentSnapshotIfDue();
 
   const { error } = await supabase.from(SNAPSHOT_TABLE).upsert({
     id: SNAPSHOT_ID,
@@ -167,12 +276,12 @@ export async function uploadScreenImage(screenId: string, dataUrl: string) {
   }
 
   const extension = getImageExtension(dataUrl);
-  const path = `screens/${screenId}.${extension}`;
+  const path = `screens/${screenId}/${getStorageSafeTimestamp()}.${extension}`;
   const blob = dataUrlToBlob(dataUrl);
   const { error } = await supabase.storage.from(SUPABASE_BUCKET).upload(path, blob, {
     cacheControl: "3600",
     contentType: blob.type,
-    upsert: true,
+    upsert: false,
   });
 
   if (error) {
