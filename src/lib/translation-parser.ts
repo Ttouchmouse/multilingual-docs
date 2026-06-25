@@ -88,7 +88,17 @@ function getFileType(fileName: string): TranslationFileType {
   return "html";
 }
 
-function createSourceId(fileName: string) {
+function createRandomToken() {
+  if (typeof crypto !== "undefined" && "getRandomValues" in crypto) {
+    const bytes = new Uint8Array(4);
+    crypto.getRandomValues(bytes);
+    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  }
+
+  return Math.random().toString(36).slice(2, 8);
+}
+
+function createSourceId(fileName: string, importedAt: string) {
   const baseName = fileName.replace(/\.[^.]+$/, "");
   const normalized = baseName
     .trim()
@@ -97,13 +107,15 @@ function createSourceId(fileName: string) {
     .replace(/[^a-z0-9_가-힣]+/g, "_")
     .replace(/_+/g, "_")
     .replace(/^_|_$/g, "");
+  const timestamp = importedAt.replace(/[-:.]/g, "").replace("T", "_").slice(0, 16);
+  const uniqueSuffix = `${timestamp}_${createRandomToken()}`;
 
-  return normalized || `src_${Date.now()}`;
+  return `${normalized || "src"}_${uniqueSuffix}`;
 }
 
 function createSource(fileName: string, fileType = getFileType(fileName)): TranslationSource {
   const now = new Date().toISOString();
-  const sourceId = createSourceId(fileName);
+  const sourceId = createSourceId(fileName, now);
 
   return {
     sourceId,

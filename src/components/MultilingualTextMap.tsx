@@ -423,6 +423,17 @@ export function MultilingualTextMap() {
   const sourceById = useMemo(() => {
     return new Map(translationSources.map((source) => [getSourceId(source), source]));
   }, [translationSources]);
+  const sourceDuplicateCountById = useMemo(() => {
+    const counts = new Map<string, number>();
+
+    for (const source of translationSources) {
+      const sourceId = getSourceId(source);
+      if (!sourceId) continue;
+      counts.set(sourceId, (counts.get(sourceId) ?? 0) + 1);
+    }
+
+    return counts;
+  }, [translationSources]);
   const searchableTranslations = useMemo(
     () => translations.filter((item) => enabledSourceIds.has(item.sourceId)),
     [enabledSourceIds, translations],
@@ -525,6 +536,18 @@ export function MultilingualTextMap() {
 
     return usage;
   }, [appState.regions, draftRegions]);
+  const linkedSourceUsage = useMemo(() => {
+    const usage = new Map<string, number>();
+
+    for (const region of [...appState.regions, ...draftRegions]) {
+      if (!region.translationItemId) continue;
+      const item = translationsById.get(region.translationItemId);
+      if (!item) continue;
+      usage.set(item.sourceId, (usage.get(item.sourceId) ?? 0) + 1);
+    }
+
+    return usage;
+  }, [appState.regions, draftRegions, translationsById]);
 
   const regionsForScreen = useMemo(
     () => appState.regions.filter((region) => region.screenId === appState.activeScreenId),
@@ -1197,6 +1220,17 @@ export function MultilingualTextMap() {
   }
 
   function toggleTranslationSource(sourceId: string) {
+    const duplicateCount = sourceDuplicateCountById.get(sourceId) ?? 0;
+    if (duplicateCount > 1) {
+      const duplicateSources = translationSources.filter((source) => getSourceId(source) === sourceId);
+      const allDisabled = duplicateSources.every((source) => source.enabled === false);
+      const actionLabel = allDisabled ? "활성화" : "비활성화";
+      const confirmed = window.confirm(
+        `동일한 내부 ID를 가진 번역 파일 ${duplicateCount}개가 함께 ${actionLabel}됩니다. 기존 중복 파일은 개별로 분리할 수 없습니다. 계속하시겠습니까?`,
+      );
+      if (!confirmed) return;
+    }
+
     setAppState((state) => ({
       ...state,
       sources: (state.sources ?? []).map((source) =>
@@ -1207,6 +1241,26 @@ export function MultilingualTextMap() {
   }
 
   function deleteTranslationSource(sourceId: string) {
+    const duplicateCount = sourceDuplicateCountById.get(sourceId) ?? 0;
+    if (duplicateCount > 1) {
+      window.alert(
+        "동일한 내부 ID를 가진 번역 파일이 여러 개 있어 안전하게 삭제할 수 없습니다. 기존 중복 파일은 삭제하지 말고 유지해주세요.",
+      );
+      return;
+    }
+
+    const linkedCount = linkedSourceUsage.get(sourceId) ?? 0;
+    if (linkedCount > 0) {
+      window.alert(
+        `이 번역 파일은 ${linkedCount.toLocaleString()}개 텍스트 영역에 연결되어 있어 삭제할 수 없습니다. 필요하면 삭제 대신 비활성화해주세요.`,
+      );
+      return;
+    }
+
+    if (!window.confirm("이 번역 파일을 삭제하시겠습니까? 삭제 후에는 이 파일의 번역 항목이 검색되지 않습니다.")) {
+      return;
+    }
+
     setAppState((state) => ({
       ...state,
       sources: (state.sources ?? []).filter((source) => getSourceId(source) !== sourceId),
@@ -2590,11 +2644,19 @@ export function MultilingualTextMap() {
           />
 
           <div className="source-list">
-            {translationSources.map((source) => {
+            {translationSources.map((source, index) => {
               const sourceId = getSourceId(source);
+              const linkedCount = linkedSourceUsage.get(sourceId) ?? 0;
+              const duplicateCount = sourceDuplicateCountById.get(sourceId) ?? 0;
+              const sourceMeta = [
+                `${getSourceItemCount(source).toLocaleString()}개`,
+                linkedCount > 0 ? `연결 ${linkedCount.toLocaleString()}개` : "연결 없음",
+                getSourceImportedAt(source).slice(0, 10),
+                duplicateCount > 1 ? `동일 ID ${duplicateCount}개` : "",
+              ].filter(Boolean);
 
               return (
-                <div className={`source-row ${source.enabled === false ? "disabled" : ""}`} key={sourceId}>
+                <div className={`source-row ${source.enabled === false ? "disabled" : ""}`} key={`${sourceId}:${index}`}>
                   <button
                     type="button"
                     className="source-main"
@@ -2604,7 +2666,7 @@ export function MultilingualTextMap() {
                     <span className="source-chip">{source.fileType}</span>
                     <span className="source-name">{formatSourceName(source.fileName)}</span>
                     <span className="source-meta-small">
-                      {getSourceItemCount(source).toLocaleString()}개 · {getSourceImportedAt(source).slice(0, 10)}
+                      {sourceMeta.join(" · ")}
                     </span>
                   </button>
                   <button
