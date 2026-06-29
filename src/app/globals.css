@@ -379,6 +379,28 @@ label {
   padding: 6px 10px;
 }
 
+.copy-feedback-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 28px;
+  z-index: 180;
+  transform: translateX(-50%);
+  min-height: 36px;
+  max-width: min(420px, calc(100vw - 40px));
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: rgba(25, 31, 40, 0.92);
+  color: #fff;
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 20px;
+  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.2);
+  pointer-events: none;
+}
+
 .persistence-status-indicator {
   width: 8px;
   height: 8px;

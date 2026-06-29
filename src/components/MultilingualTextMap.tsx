@@ -402,6 +402,7 @@ export function MultilingualTextMap() {
   const [globalSearchQuery, setGlobalSearchQuery] = useState("");
   const [globalSearchOpen, setGlobalSearchOpen] = useState(false);
   const [pendingGlobalFocusRegionId, setPendingGlobalFocusRegionId] = useState<string>();
+  const [copyFeedback, setCopyFeedback] = useState<{ id: number; message: string }>();
   const [updateCandidateRegionId, setUpdateCandidateRegionId] = useState<string>();
   const [ocrByRegion, setOcrByRegion] = useState<Record<string, RegionOcrState>>({});
   const [persistenceStatus, setPersistenceStatus] = useState<PersistenceStatus>({
@@ -994,6 +995,13 @@ export function MultilingualTextMap() {
     window.addEventListener("beforeunload", onBeforeUnload);
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
   }, [persistenceStatus.phase]);
+
+  useEffect(() => {
+    if (!copyFeedback) return;
+
+    const timeout = window.setTimeout(() => setCopyFeedback(undefined), 1600);
+    return () => window.clearTimeout(timeout);
+  }, [copyFeedback]);
 
   useEffect(() => {
     if (!isLoaded || translationSources.length > 0 || translations.length > 0 || defaultDataLoadAttempted.current) return;
@@ -1871,6 +1879,35 @@ export function MultilingualTextMap() {
     setEditingCell(null);
   }
 
+  async function copyTextCellValue(value: string, label: string) {
+    const text = value.trim();
+    if (!text) {
+      setCopyFeedback({ id: Date.now(), message: "복사할 텍스트가 없습니다." });
+      return;
+    }
+
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const textarea = document.createElement("textarea");
+        textarea.value = text;
+        textarea.setAttribute("readonly", "");
+        textarea.style.position = "fixed";
+        textarea.style.left = "-9999px";
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand("copy");
+        document.body.removeChild(textarea);
+      }
+
+      setCopyFeedback({ id: Date.now(), message: `${label} 텍스트를 복사했습니다.` });
+    } catch (error) {
+      console.error("[clipboard] Failed to copy translation cell value.", error);
+      setCopyFeedback({ id: Date.now(), message: "복사에 실패했습니다." });
+    }
+  }
+
   function getCellValue(region: TextRegion, item: TranslationItem | undefined, languageCode: LanguageCode) {
     const hasOverride = Object.prototype.hasOwnProperty.call(region.translationOverrides ?? {}, languageCode);
 
@@ -2493,6 +2530,11 @@ export function MultilingualTextMap() {
                             }`}
                             onDoubleClick={(event) => {
                               event.stopPropagation();
+                              if (!isEditing) {
+                                void copyTextCellValue(displayValue, language.label);
+                                return;
+                              }
+
                               beginCellEdit(region, item, language.code);
                             }}
                           >
@@ -3302,6 +3344,11 @@ export function MultilingualTextMap() {
       ) : null}
 
       {mode !== "view" ? renderPersistenceStatus() : null}
+      {copyFeedback ? (
+        <div className="copy-feedback-toast" role="status" aria-live="polite">
+          {copyFeedback.message}
+        </div>
+      ) : null}
 
       {!isLoaded ? (
         <section className="persistence-loading-view" aria-label="저장 데이터 로드 중">
