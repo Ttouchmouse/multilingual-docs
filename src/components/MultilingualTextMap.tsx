@@ -24,6 +24,7 @@ import {
   getInitialAppState,
   loadPersistedData,
   savePersistedData,
+  type PersistedDataSource,
   type SupabaseLoadStatus,
 } from "@/lib/storage";
 import { uploadScreenImage } from "@/lib/supabase-storage";
@@ -418,6 +419,7 @@ export function MultilingualTextMap() {
   const itemRefs = useRef<Record<string, HTMLElement | null>>({});
   const defaultDataLoadAttempted = useRef(false);
   const skipNextSupabaseSaveRef = useRef(true);
+  const persistedDataSourceRef = useRef<PersistedDataSource>("empty");
   const supabaseLoadStatusRef = useRef<SupabaseLoadStatus>("unconfigured");
   const supabaseSnapshotUpdatedAtRef = useRef<string | undefined>(undefined);
   const persistenceRevisionRef = useRef(0);
@@ -804,6 +806,7 @@ export function MultilingualTextMap() {
         if (!loadedState.activeScreenId && loadedState.screens[0]) {
           loadedState.activeScreenId = loadedState.screens[0].id;
         }
+        persistedDataSourceRef.current = data.source;
         supabaseLoadStatusRef.current = data.supabaseStatus;
         supabaseSnapshotUpdatedAtRef.current = data.supabaseUpdatedAt;
         skipNextSupabaseSaveRef.current = true;
@@ -830,8 +833,8 @@ export function MultilingualTextMap() {
             message:
               data.supabaseStatus === "failed"
                 ? "Supabase 로드에 실패해 IndexedDB 캐시를 표시하고 있습니다. 새로고침 후 다시 확인해주세요."
-                : "Supabase 원본이 없어 IndexedDB 캐시를 표시하고 있습니다.",
-            recovery: data.supabaseStatus === "failed" ? "reload" : undefined,
+                : "Supabase 원본이 없어 IndexedDB 캐시를 표시하고 있습니다. 원본 저장은 차단됩니다.",
+            recovery: "reload",
           });
         } else {
           setPersistenceStatus({
@@ -846,6 +849,7 @@ export function MultilingualTextMap() {
         setIsLoaded(true);
       })
       .catch((error) => {
+        persistedDataSourceRef.current = "empty";
         supabaseLoadStatusRef.current = "failed";
         skipNextSupabaseSaveRef.current = true;
         console.error("[persistence] Persisted data load failed. Showing empty state only after all stores failed.", error);
@@ -907,6 +911,15 @@ export function MultilingualTextMap() {
       });
       return;
     }
+    if (persistedDataSourceRef.current === "indexeddb" && supabaseLoadStatusRef.current !== "success") {
+      console.error("[persistence] Cloud-first save blocked because the app is showing IndexedDB fallback data.");
+      setPersistenceStatus({
+        phase: "warning",
+        message: "로컬 캐시 데이터를 표시 중이라 Supabase 원본 저장이 차단되었습니다. 새로고침 후 다시 확인해주세요.",
+        recovery: "reload",
+      });
+      return;
+    }
     const revision = ++persistenceRevisionRef.current;
     const showSaveFeedback = showNextSaveFeedbackRef.current;
     showNextSaveFeedbackRef.current = false;
@@ -924,6 +937,8 @@ export function MultilingualTextMap() {
         .then((saveResult) => {
           if (persistenceRevisionRef.current !== revision) return;
           supabaseSnapshotUpdatedAtRef.current = saveResult.updatedAt ?? supabaseSnapshotUpdatedAtRef.current;
+          persistedDataSourceRef.current = "supabase";
+          supabaseLoadStatusRef.current = "success";
           if (showSaveFeedback) {
             setPersistenceStatus({
               phase: "saved",
