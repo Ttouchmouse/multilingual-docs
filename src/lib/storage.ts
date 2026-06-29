@@ -13,10 +13,11 @@ export type SupabaseLoadStatus = "success" | "empty" | "failed" | "unconfigured"
 type PersistedSnapshot = {
   appState: AppState;
   translations: TranslationItem[];
+  expectedUpdatedAt?: string;
 };
 
 let pendingPersistedSnapshot: PersistedSnapshot | undefined;
-let persistedSaveLoop: Promise<void> | null = null;
+let persistedSaveLoop: Promise<{ updatedAt?: string }> | null = null;
 
 function openDatabase() {
   return new Promise<IDBDatabase>((resolve, reject) => {
@@ -152,6 +153,7 @@ export async function loadPersistedData() {
           translations: cloudTranslations,
           source: "supabase" as PersistedDataSource,
           supabaseStatus,
+          supabaseUpdatedAt: cloudData.updatedAt,
         };
       }
       supabaseStatus = "empty";
@@ -186,11 +188,12 @@ export async function loadPersistedData() {
     translations: localTranslations,
     source,
     supabaseStatus,
+    supabaseUpdatedAt: undefined,
   };
 }
 
-export function savePersistedData(appState: AppState, translations: TranslationItem[]) {
-  pendingPersistedSnapshot = { appState, translations };
+export function savePersistedData(appState: AppState, translations: TranslationItem[], expectedUpdatedAt?: string) {
+  pendingPersistedSnapshot = { appState, translations, expectedUpdatedAt };
 
   if (persistedSaveLoop) {
     console.info("[persistence] Save already in progress. Queued latest application snapshot.");
@@ -198,9 +201,12 @@ export function savePersistedData(appState: AppState, translations: TranslationI
   }
 
   persistedSaveLoop = (async () => {
+    let latestUpdatedAt = expectedUpdatedAt;
+
     while (pendingPersistedSnapshot) {
       const snapshot = pendingPersistedSnapshot;
       pendingPersistedSnapshot = undefined;
+      const snapshotExpectedUpdatedAt = latestUpdatedAt ?? snapshot.expectedUpdatedAt;
 
       if (!isSupabaseConfigured) {
         throw new Error("Supabase 환경변수가 설정되지 않아 원본 데이터를 저장할 수 없습니다.");
@@ -211,9 +217,15 @@ export function savePersistedData(appState: AppState, translations: TranslationI
         regions: snapshot.appState.regions.length,
         sources: snapshot.appState.sources?.length ?? 0,
         translations: snapshot.translations.length,
+        expectedUpdatedAt: snapshotExpectedUpdatedAt,
       });
 
-      await saveSupabaseSnapshot(snapshot.appState, snapshot.translations);
+      const saveResult = await saveSupabaseSnapshot(
+        snapshot.appState,
+        snapshot.translations,
+        snapshotExpectedUpdatedAt,
+      );
+      latestUpdatedAt = saveResult.updatedAt ?? latestUpdatedAt;
       await Promise.all([
         setValue(APP_STATE_KEY, snapshot.appState),
         setValue(TRANSLATIONS_KEY, snapshot.translations),
@@ -221,6 +233,8 @@ export function savePersistedData(appState: AppState, translations: TranslationI
 
       console.info("[persistence] Cloud save succeeded. IndexedDB cache refreshed.");
     }
+
+    return { updatedAt: latestUpdatedAt };
   })().finally(() => {
     persistedSaveLoop = null;
   });

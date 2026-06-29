@@ -419,6 +419,7 @@ export function MultilingualTextMap() {
   const defaultDataLoadAttempted = useRef(false);
   const skipNextSupabaseSaveRef = useRef(true);
   const supabaseLoadStatusRef = useRef<SupabaseLoadStatus>("unconfigured");
+  const supabaseSnapshotUpdatedAtRef = useRef<string | undefined>(undefined);
   const persistenceRevisionRef = useRef(0);
   const showNextSaveFeedbackRef = useRef(false);
   const suppressedRegionClickRef = useRef<string | undefined>(undefined);
@@ -804,10 +805,12 @@ export function MultilingualTextMap() {
           loadedState.activeScreenId = loadedState.screens[0].id;
         }
         supabaseLoadStatusRef.current = data.supabaseStatus;
+        supabaseSnapshotUpdatedAtRef.current = data.supabaseUpdatedAt;
         skipNextSupabaseSaveRef.current = true;
         console.info("[persistence] Applying loaded data to View Mode", {
           source: data.source,
           supabaseStatus: data.supabaseStatus,
+          supabaseUpdatedAt: data.supabaseUpdatedAt,
           activeScreenId: loadedState.activeScreenId,
           screens: loadedState.screens.length,
           regions: loadedState.regions.length,
@@ -916,9 +919,11 @@ export function MultilingualTextMap() {
     }
 
     const timeout = window.setTimeout(() => {
-      savePersistedData(appState, translations)
-        .then(() => {
+      const expectedUpdatedAt = supabaseSnapshotUpdatedAtRef.current;
+      savePersistedData(appState, translations, expectedUpdatedAt)
+        .then((saveResult) => {
           if (persistenceRevisionRef.current !== revision) return;
+          supabaseSnapshotUpdatedAtRef.current = saveResult.updatedAt ?? supabaseSnapshotUpdatedAtRef.current;
           if (showSaveFeedback) {
             setPersistenceStatus({
               phase: "saved",
@@ -930,6 +935,15 @@ export function MultilingualTextMap() {
           if (persistenceRevisionRef.current !== revision) return;
           const message = error instanceof Error ? error.message : "알 수 없는 저장 오류";
           console.error("[persistence] Cloud-first save failed. IndexedDB cache was not updated.", error);
+          if (error instanceof Error && error.name === "SupabaseSnapshotConflictError") {
+            setPersistenceStatus({
+              phase: "error",
+              message,
+              recovery: "reload",
+            });
+            return;
+          }
+
           setPersistenceStatus({
             phase: "error",
             message: `Supabase 저장에 실패했습니다. 변경사항이 저장되지 않았습니다. ${message}`,

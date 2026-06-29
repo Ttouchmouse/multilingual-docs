@@ -12,6 +12,7 @@ let snapshotBackupTableUnavailable = false;
 type PersistedPayload = {
   app_state: AppState;
   translations: TranslationItem[];
+  updated_at?: string;
 };
 
 type PersistedRow = PersistedPayload & {
@@ -26,6 +27,13 @@ type SupabaseErrorDetails = {
   details?: string | null;
   hint?: string | null;
 };
+
+export class SupabaseSnapshotConflictError extends Error {
+  constructor() {
+    super("다른 사용자가 먼저 저장했습니다. 최신 데이터를 다시 불러온 뒤 작업해주세요.");
+    this.name = "SupabaseSnapshotConflictError";
+  }
+}
 
 function getSupabaseErrorDetails(error: unknown): SupabaseErrorDetails {
   if (typeof error === "object" && error !== null) {
@@ -93,7 +101,7 @@ export async function loadSupabaseSnapshot() {
 
   const { data, error } = await supabase
     .from(SNAPSHOT_TABLE)
-    .select("app_state, translations")
+    .select("app_state, translations, updated_at")
     .eq("id", SNAPSHOT_ID)
     .maybeSingle<PersistedPayload>();
 
@@ -117,11 +125,13 @@ export async function loadSupabaseSnapshot() {
     regions: data.app_state?.regions?.length ?? 0,
     sources: data.app_state?.sources?.length ?? 0,
     translations: data.translations?.length ?? 0,
+    updatedAt: data.updated_at,
   });
 
   return {
     appState: data.app_state,
     translations: data.translations ?? [],
+    updatedAt: data.updated_at,
   };
 }
 
@@ -212,9 +222,10 @@ async function backupCurrentSnapshotIfDue() {
 async function performSupabaseSnapshotSave(
   appState: AppState,
   translations: TranslationItem[],
+  expectedUpdatedAt?: string,
   attempt = 1,
-): Promise<void> {
-  if (!supabase) return;
+): Promise<{ updatedAt?: string }> {
+  if (!supabase) return {};
 
   console.info("[persistence] Saving Supabase snapshot", {
     table: SNAPSHOT_TABLE,
@@ -224,17 +235,38 @@ async function performSupabaseSnapshotSave(
     regions: appState.regions.length,
     sources: appState.sources?.length ?? 0,
     translations: translations.length,
+    expectedUpdatedAt,
   });
 
   await backupCurrentSnapshotIfDue();
+  const nextUpdatedAt = new Date().toISOString();
 
-  const { error } = await supabase.from(SNAPSHOT_TABLE).upsert({
-    id: SNAPSHOT_ID,
-    owner_id: null,
-    app_state: appState,
-    translations,
-    updated_at: new Date().toISOString(),
-  });
+  const saveResult = expectedUpdatedAt
+    ? await supabase
+        .from(SNAPSHOT_TABLE)
+        .update({
+          owner_id: null,
+          app_state: appState,
+          translations,
+          updated_at: nextUpdatedAt,
+        })
+        .eq("id", SNAPSHOT_ID)
+        .eq("updated_at", expectedUpdatedAt)
+        .select("updated_at")
+        .maybeSingle<{ updated_at: string }>()
+    : await supabase
+        .from(SNAPSHOT_TABLE)
+        .upsert({
+          id: SNAPSHOT_ID,
+          owner_id: null,
+          app_state: appState,
+          translations,
+          updated_at: nextUpdatedAt,
+        })
+        .select("updated_at")
+        .single<{ updated_at: string }>();
+
+  const { data, error } = saveResult;
 
   if (error) {
     const errorDetails = getSupabaseErrorDetails(error);
@@ -242,7 +274,7 @@ async function performSupabaseSnapshotSave(
     if (errorDetails.code === "57014" && attempt === 1) {
       console.warn("[persistence] Supabase snapshot save timed out. Retrying once.", errorDetails);
       await wait(750);
-      return performSupabaseSnapshotSave(appState, translations, attempt + 1);
+      return performSupabaseSnapshotSave(appState, translations, expectedUpdatedAt, attempt + 1);
     }
 
     console.warn("[persistence] Supabase snapshot save failed", errorDetails);
@@ -252,18 +284,30 @@ async function performSupabaseSnapshotSave(
     );
   }
 
+  if (expectedUpdatedAt && !data) {
+    console.warn("[persistence] Supabase snapshot save blocked by revision conflict", {
+      table: SNAPSHOT_TABLE,
+      id: SNAPSHOT_ID,
+      expectedUpdatedAt,
+    });
+    throw new SupabaseSnapshotConflictError();
+  }
+
   console.info("[persistence] Supabase snapshot saved", {
     table: SNAPSHOT_TABLE,
     id: SNAPSHOT_ID,
+    updatedAt: data?.updated_at,
   });
+
+  return { updatedAt: data?.updated_at ?? nextUpdatedAt };
 }
 
-export function saveSupabaseSnapshot(appState: AppState, translations: TranslationItem[]) {
+export function saveSupabaseSnapshot(appState: AppState, translations: TranslationItem[], expectedUpdatedAt?: string) {
   if (!supabase) {
     return Promise.reject(new Error("Supabase is not configured."));
   }
 
-  return performSupabaseSnapshotSave(appState, translations);
+  return performSupabaseSnapshotSave(appState, translations, expectedUpdatedAt);
 }
 
 export async function uploadScreenImage(screenId: string, dataUrl: string) {
