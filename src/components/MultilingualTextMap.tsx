@@ -126,6 +126,7 @@ type PersistenceStatus = {
 };
 
 const DRAFT_SCREEN_ID = "__draft_screen__";
+const OPEN_GROUPS_STORAGE_KEY = "tg-multilingual-docs:open-groups";
 
 const defaultScreenForm: ScreenForm = {
   name: "",
@@ -393,6 +394,38 @@ function createUniqueGroupName(groups: string[], baseName = "기본") {
   return `${baseName} ${index}`;
 }
 
+function loadStoredOpenGroups() {
+  if (typeof window === "undefined") return {};
+
+  try {
+    const rawValue = window.localStorage.getItem(OPEN_GROUPS_STORAGE_KEY);
+    if (!rawValue) return {};
+
+    const parsedValue: unknown = JSON.parse(rawValue);
+    if (!parsedValue || typeof parsedValue !== "object" || Array.isArray(parsedValue)) return {};
+
+    return Object.fromEntries(
+      Object.entries(parsedValue).filter((entry): entry is [string, boolean] => {
+        const [group, expanded] = entry;
+        return typeof group === "string" && typeof expanded === "boolean";
+      }),
+    );
+  } catch (error) {
+    console.warn("[ui] Failed to load stored group open states.", error);
+    return {};
+  }
+}
+
+function saveStoredOpenGroups(openGroups: Record<string, boolean>) {
+  if (typeof window === "undefined") return;
+
+  try {
+    window.localStorage.setItem(OPEN_GROUPS_STORAGE_KEY, JSON.stringify(openGroups));
+  } catch (error) {
+    console.warn("[ui] Failed to save group open states.", error);
+  }
+}
+
 function BackArrowIcon() {
   return (
     <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
@@ -481,6 +514,8 @@ export function MultilingualTextMap() {
   const duplicateMoveAxisRef = useRef<MoveAxis | undefined>(undefined);
   const addHistoryEntryActiveRef = useRef(false);
   const allowAddHistoryPopRef = useRef(false);
+  const openGroupsLoadedRef = useRef(false);
+  const skipNextOpenGroupsSaveRef = useRef(true);
 
   const translationSources = appState.sources ?? (appState.source ? [appState.source] : []);
   const enabledSourceIds = useMemo(
@@ -920,6 +955,20 @@ export function MultilingualTextMap() {
       active = false;
     };
   }, []);
+
+  useEffect(() => {
+    openGroupsLoadedRef.current = true;
+    setOpenGroups(loadStoredOpenGroups());
+  }, []);
+
+  useEffect(() => {
+    if (!openGroupsLoadedRef.current) return;
+    if (skipNextOpenGroupsSaveRef.current) {
+      skipNextOpenGroupsSaveRef.current = false;
+      return;
+    }
+    saveStoredOpenGroups(openGroups);
+  }, [openGroups]);
 
   useEffect(() => {
     const onPopState = () => {
