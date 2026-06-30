@@ -5,6 +5,7 @@ const SNAPSHOT_ID = SUPABASE_SNAPSHOT_ID;
 const SNAPSHOT_TABLE = "app_snapshots";
 const SNAPSHOT_BACKUP_TABLE = "app_snapshot_backups";
 const SNAPSHOT_BACKUP_INTERVAL_MS = 10 * 60 * 1000;
+const SNAPSHOT_BACKUP_RETENTION_COUNT = 30;
 
 let nextSnapshotBackupCheckAt = 0;
 let snapshotBackupTableUnavailable = false;
@@ -86,6 +87,41 @@ function getBackupId(timestamp: string) {
     : Math.random().toString(36).slice(2);
 
   return `${SNAPSHOT_ID}_${timestamp}_${suffix}`;
+}
+
+async function pruneOldSnapshotBackups() {
+  if (!supabase || snapshotBackupTableUnavailable) return;
+
+  const { data: backups, error: listError } = await supabase
+    .from(SNAPSHOT_BACKUP_TABLE)
+    .select("id, created_at")
+    .eq("snapshot_id", SNAPSHOT_ID)
+    .order("created_at", { ascending: false })
+    .range(SNAPSHOT_BACKUP_RETENTION_COUNT, SNAPSHOT_BACKUP_RETENTION_COUNT + 49);
+
+  if (listError) {
+    throw listError;
+  }
+
+  const backupIds = backups?.map((backup) => backup.id).filter(Boolean) ?? [];
+  if (backupIds.length === 0) return;
+
+  const { error: deleteError } = await supabase
+    .from(SNAPSHOT_BACKUP_TABLE)
+    .delete()
+    .eq("snapshot_id", SNAPSHOT_ID)
+    .in("id", backupIds);
+
+  if (deleteError) {
+    throw deleteError;
+  }
+
+  console.info("[persistence] Old snapshot backups pruned.", {
+    table: SNAPSHOT_BACKUP_TABLE,
+    snapshotId: SNAPSHOT_ID,
+    retentionCount: SNAPSHOT_BACKUP_RETENTION_COUNT,
+    deletedCount: backupIds.length,
+  });
 }
 
 export async function loadSupabaseSnapshot() {
@@ -206,6 +242,12 @@ async function backupCurrentSnapshotIfDue() {
       snapshotId: SNAPSHOT_ID,
       createdAt: backupCreatedAt,
     });
+
+    try {
+      await pruneOldSnapshotBackups();
+    } catch (pruneError) {
+      console.warn("[persistence] Snapshot backup pruning failed. Continuing primary save.", getSupabaseErrorDetails(pruneError));
+    }
   } catch (error) {
     const errorDetails = getSupabaseErrorDetails(error);
     if (errorDetails.code === "42P01") {
