@@ -195,6 +195,44 @@ function cloneRegions(regions: TextRegion[]) {
   }));
 }
 
+function scaleRegionsToImageSize(
+  regions: TextRegion[],
+  fromWidth: number,
+  fromHeight: number,
+  toWidth: number,
+  toHeight: number,
+) {
+  const displayScale = fromWidth > 0 ? toWidth / fromWidth : 1;
+
+  return cloneRegions(regions).map((region) => {
+    if (!isScreenRegion(region)) return region;
+
+    const width = Math.min(Math.max(1, Math.round(region.width * displayScale)), toWidth);
+    const height = Math.min(Math.max(1, Math.round(region.height * displayScale)), toHeight);
+
+    return {
+      ...region,
+      x: clamp(Math.round(region.x * displayScale), 0, Math.max(0, toWidth - width)),
+      y: clamp(Math.round(region.y * displayScale), 0, Math.max(0, toHeight - height)),
+      width,
+      height,
+    };
+  });
+}
+
+function replaceScreenRegions(allRegions: TextRegion[], screenId: string, nextScreenRegions: TextRegion[]) {
+  let inserted = false;
+  const nextRegions = cloneRegions(nextScreenRegions);
+  const mergedRegions = allRegions.flatMap((region) => {
+    if (region.screenId !== screenId) return [region];
+    if (inserted) return [];
+    inserted = true;
+    return nextRegions;
+  });
+
+  return inserted ? mergedRegions : [...mergedRegions, ...nextRegions];
+}
+
 function readFileAsText(file: File) {
   return new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
@@ -220,6 +258,17 @@ function readFileAsArrayBuffer(file: File) {
     reader.onerror = () => reject(reader.error);
     reader.readAsArrayBuffer(file);
   });
+}
+
+function getClipboardImageFile(event: ClipboardEvent) {
+  const items = Array.from(event.clipboardData?.items ?? []);
+  const imageItem = items.find((item) => item.kind === "file" && item.type.startsWith("image/"));
+  const file = imageItem?.getAsFile();
+  if (!file) return undefined;
+
+  const extension = file.type.split("/")[1]?.replace("jpeg", "jpg") || "png";
+  const fileName = file.name && file.name !== "image.png" ? file.name : `pasted-screen-${Date.now()}.${extension}`;
+  return new File([file], fileName, { type: file.type || "image/png" });
 }
 
 function loadImageElement(src: string) {
@@ -380,6 +429,7 @@ export function MultilingualTextMap() {
   const [screenForm, setScreenForm] = useState<ScreenForm>(defaultScreenForm);
   const [imageDraft, setImageDraft] = useState<ImageDraft | null>(null);
   const [draftRegions, setDraftRegions] = useState<TextRegion[]>([]);
+  const [editDraftRegions, setEditDraftRegions] = useState<TextRegion[] | null>(null);
   const [selectedRegionId, setSelectedRegionId] = useState<string>();
   const [keyDialogRegionId, setKeyDialogRegionId] = useState<string>();
   const [keyDialogAnchor, setKeyDialogAnchor] = useState<DialogAnchor>();
@@ -494,6 +544,15 @@ export function MultilingualTextMap() {
     );
   const editableImage = useMemo<ImageTarget | undefined>(() => {
     if (mode === "add" && imageDraft) {
+      return {
+        imageUrl: imageDraft.imageUrl,
+        imageWidth: imageDraft.imageWidth,
+        imageHeight: imageDraft.imageHeight,
+        name: screenForm.name || imageDraft.fileName,
+      };
+    }
+
+    if (mode === "edit" && imageDraft) {
       return {
         imageUrl: imageDraft.imageUrl,
         imageWidth: imageDraft.imageWidth,
@@ -620,7 +679,7 @@ export function MultilingualTextMap() {
     [appState.activeScreenId, appState.regions],
   );
 
-  const activeRegions = mode === "add" ? draftRegions : regionsForScreen;
+  const activeRegions = mode === "add" ? draftRegions : editDraftRegions ?? regionsForScreen;
   const selectedRegion = activeRegions.find((region) => region.id === selectedRegionId);
 
   const filteredRegions = useMemo(() => {
@@ -714,23 +773,18 @@ export function MultilingualTextMap() {
       return;
     }
 
+    if (editDraftRegions) {
+      setEditDraftRegions(nextRegions);
+      return;
+    }
+
     const screenId = currentScreen?.id;
     if (!screenId) return;
 
-    setAppState((state) => {
-      let inserted = false;
-      const mergedRegions = state.regions.flatMap((region) => {
-        if (region.screenId !== screenId) return [region];
-        if (inserted) return [];
-        inserted = true;
-        return nextRegions;
-      });
-
-      return {
-        ...state,
-        regions: inserted ? mergedRegions : [...mergedRegions, ...nextRegions],
-      };
-    });
+    setAppState((state) => ({
+      ...state,
+      regions: replaceScreenRegions(state.regions, screenId, nextRegions),
+    }));
   }
 
   function undoRegionChange() {
@@ -1098,6 +1152,7 @@ export function MultilingualTextMap() {
     if (mode !== "edit" || !currentScreen) return;
     setScreenForm(screenToForm(currentScreen));
     setImageDraft(null);
+    setEditDraftRegions(null);
   }, [currentScreen, mode]);
 
   useEffect(() => {
@@ -1188,6 +1243,11 @@ export function MultilingualTextMap() {
         return;
       }
 
+      if (editDraftRegions) {
+        setEditDraftRegions((regions) => regions?.map(updateRegion) ?? regions);
+        return;
+      }
+
       setAppState((state) => ({
         ...state,
         regions: state.regions.map(updateRegion),
@@ -1217,6 +1277,8 @@ export function MultilingualTextMap() {
 
           if (mode === "add") {
             setDraftRegions((regions) => [...regions, region]);
+          } else if (editDraftRegions) {
+            setEditDraftRegions((regions) => [...(regions ?? []), region]);
           } else {
             setAppState((state) => ({ ...state, regions: [...state.regions, region] }));
           }
@@ -1247,6 +1309,8 @@ export function MultilingualTextMap() {
 
         if (mode === "add") {
           setDraftRegions((regions) => regions.map(applyFinalRect));
+        } else if (editDraftRegions) {
+          setEditDraftRegions((regions) => regions?.map(applyFinalRect) ?? regions);
         } else {
           setAppState((state) => ({ ...state, regions: state.regions.map(applyFinalRect) }));
         }
@@ -1268,7 +1332,7 @@ export function MultilingualTextMap() {
       window.removeEventListener("pointermove", onPointerMove);
       window.removeEventListener("pointerup", onPointerUp);
     };
-  }, [currentScreen?.id, editableImage, interaction, isEditing, mode]);
+  }, [currentScreen?.id, editDraftRegions, editableImage, interaction, isEditing, mode]);
 
   function addTranslationSource(source: TranslationSource, items: TranslationItem[]) {
     setAppState((state) => ({
@@ -1400,13 +1464,27 @@ export function MultilingualTextMap() {
 
     const imageUrl = await readFileAsDataUrl(file);
     const size = await loadImageSize(imageUrl);
+    const previousImage = imageDraft ?? currentScreen;
     setImageDraft({
       imageUrl,
       imageWidth: size.width,
       imageHeight: size.height,
       fileName: file.name,
     });
-    setDraftRegions([]);
+    if (mode === "add") {
+      setDraftRegions([]);
+      setEditDraftRegions(null);
+    } else if (mode === "edit" && previousImage) {
+      setEditDraftRegions(
+        scaleRegionsToImageSize(
+          editDraftRegions ?? regionsForScreen,
+          previousImage.imageWidth,
+          previousImage.imageHeight,
+          size.width,
+          size.height,
+        ),
+      );
+    }
     setSelectedRegionId(undefined);
     resetRegionHistory();
     closeKeyDialog();
@@ -1414,6 +1492,28 @@ export function MultilingualTextMap() {
       setScreenForm((form) => ({ ...form, name: file.name.replace(/\.[^.]+$/, "") }));
     }
   }
+
+  useEffect(() => {
+    if (!isEditing) return;
+
+    const handlePaste = (event: ClipboardEvent) => {
+      const file = getClipboardImageFile(event);
+      if (!file) return;
+
+      event.preventDefault();
+      void handleImageDraft(file)
+        .then(() => {
+          setCopyFeedback({ id: Date.now(), message: "붙여넣은 이미지를 적용했습니다." });
+        })
+        .catch((error) => {
+          console.error("[image] Failed to apply pasted image.", error);
+          setCopyFeedback({ id: Date.now(), message: "이미지 붙여넣기에 실패했습니다." });
+        });
+    };
+
+    window.addEventListener("paste", handlePaste);
+    return () => window.removeEventListener("paste", handlePaste);
+  }, [currentScreen, editDraftRegions, imageDraft, isEditing, regionsForScreen, screenForm.name]);
 
   async function runOcrForRegion(region: TextRegion, imageTarget = editableImage) {
     if (!imageTarget) return;
@@ -1458,6 +1558,7 @@ export function MultilingualTextMap() {
     setScreenForm({ ...defaultScreenForm, group: group ?? appState.groups?.[0] ?? defaultScreenForm.group });
     setImageDraft(null);
     setDraftRegions([]);
+    setEditDraftRegions(null);
     setSelectedRegionId(undefined);
     setEditingCell(null);
     resetRegionHistory();
@@ -1558,6 +1659,7 @@ export function MultilingualTextMap() {
     setScreenForm(screenToForm(currentScreen));
     setImageDraft(null);
     setDraftRegions([]);
+    setEditDraftRegions(null);
     setEditingCell(null);
     resetRegionHistory();
   }
@@ -1567,6 +1669,7 @@ export function MultilingualTextMap() {
     setMode("view");
     setImageDraft(null);
     setDraftRegions([]);
+    setEditDraftRegions(null);
     setInteraction(null);
     setDraftRect(null);
     setEditingCell(null);
@@ -1682,8 +1785,16 @@ export function MultilingualTextMap() {
             }
           : screen,
       ),
+      regions: editDraftRegions
+        ? replaceScreenRegions(
+            state.regions,
+            currentScreen.id,
+            editDraftRegions.map((region) => ({ ...region, screenId: currentScreen.id, updatedAt: now })),
+          )
+        : state.regions,
     }));
     setImageDraft(null);
+    setEditDraftRegions(null);
     setMode("view");
     setSelectedRegionId(undefined);
     setInteraction(null);
@@ -1700,6 +1811,19 @@ export function MultilingualTextMap() {
             ? { ...region, ...patch, updatedAt: new Date().toISOString() }
             : region,
         ),
+      );
+      return;
+    }
+
+    if (editDraftRegions) {
+      setEditDraftRegions((regions) =>
+        regions
+          ? regions.map((region) =>
+              region.id === regionId
+                ? { ...region, ...patch, updatedAt: new Date().toISOString() }
+                : region,
+            )
+          : regions,
       );
       return;
     }
@@ -1723,6 +1847,13 @@ export function MultilingualTextMap() {
     recordRegionHistory(activeRegions);
     if (mode === "add") {
       setDraftRegions((regions) => regions.filter((region) => region.id !== regionId));
+      setSelectedRegionId(undefined);
+      closeKeyDialog();
+      return;
+    }
+
+    if (editDraftRegions) {
+      setEditDraftRegions((regions) => regions?.filter((region) => region.id !== regionId) ?? regions);
       setSelectedRegionId(undefined);
       closeKeyDialog();
       return;
@@ -1769,6 +1900,11 @@ export function MultilingualTextMap() {
       return;
     }
 
+    if (editDraftRegions) {
+      setEditDraftRegions((regions) => (regions ? reorder(regions) : regions));
+      return;
+    }
+
     const screenId = currentScreen?.id;
     if (!screenId) return;
 
@@ -1812,6 +1948,12 @@ export function MultilingualTextMap() {
     if (mode === "add") {
       setDraftRegions((regions) => {
         const nextRegions = [...regions];
+        nextRegions.splice(nextIndex, 0, region);
+        return nextRegions;
+      });
+    } else if (editDraftRegions) {
+      setEditDraftRegions((regions) => {
+        const nextRegions = [...(regions ?? [])];
         nextRegions.splice(nextIndex, 0, region);
         return nextRegions;
       });
@@ -2357,12 +2499,15 @@ export function MultilingualTextMap() {
       );
     }
 
+    const previewRegions = mode === "add" ? draftRegions : editDraftRegions ?? regionsForScreen;
+    const coordinateImage = imageDraft;
+
     return (
       <div className="image-frame add-image-frame">
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img src={imageDraft.imageUrl} alt={screenForm.name || imageDraft.fileName} />
         <div ref={overlayRef} className="region-layer" onPointerDown={startDrawing}>
-          {draftRegions.filter(isScreenRegion).map((region) => {
+          {previewRegions.filter(isScreenRegion).map((region) => {
             const linked = Boolean(region.translationItemId);
             const selected = region.id === selectedRegionId;
 
@@ -2373,10 +2518,10 @@ export function MultilingualTextMap() {
                 data-region-selection-scope="true"
                 className={`region-box ${selected ? "selected" : ""} ${linked ? "linked" : "unlinked"} editable`}
                 style={{
-                  left: `${(region.x / imageDraft.imageWidth) * 100}%`,
-                  top: `${(region.y / imageDraft.imageHeight) * 100}%`,
-                  width: `${(region.width / imageDraft.imageWidth) * 100}%`,
-                  height: `${(region.height / imageDraft.imageHeight) * 100}%`,
+                  left: `${(region.x / coordinateImage.imageWidth) * 100}%`,
+                  top: `${(region.y / coordinateImage.imageHeight) * 100}%`,
+                  width: `${(region.width / coordinateImage.imageWidth) * 100}%`,
+                  height: `${(region.height / coordinateImage.imageHeight) * 100}%`,
                 }}
                 onPointerMove={updateRegionCursor}
                 onPointerLeave={(event) => {
@@ -2400,10 +2545,10 @@ export function MultilingualTextMap() {
             <div
               className="region-draft"
               style={{
-                left: `${(draftRect.x / imageDraft.imageWidth) * 100}%`,
-                top: `${(draftRect.y / imageDraft.imageHeight) * 100}%`,
-                width: `${(draftRect.width / imageDraft.imageWidth) * 100}%`,
-                height: `${(draftRect.height / imageDraft.imageHeight) * 100}%`,
+                left: `${(draftRect.x / coordinateImage.imageWidth) * 100}%`,
+                top: `${(draftRect.y / coordinateImage.imageHeight) * 100}%`,
+                width: `${(draftRect.width / coordinateImage.imageWidth) * 100}%`,
+                height: `${(draftRect.height / coordinateImage.imageHeight) * 100}%`,
               }}
             />
           ) : null}
@@ -3216,7 +3361,7 @@ export function MultilingualTextMap() {
               <p>
                 텍스트 영역을 지정할 화면을
                 <br />
-                업로드해주세요.
+                업로드하거나 붙여넣어주세요.
               </p>
               <button type="button" onClick={() => imageFileInputRef.current?.click()}>
                 업로드
