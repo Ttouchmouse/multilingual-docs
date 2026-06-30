@@ -1036,6 +1036,40 @@ label {
   background: #f9fafb;
 }
 
+.screen-group.dragging,
+.screen-list-item.dragging {
+  opacity: 0.45;
+}
+
+.screen-group-toggle,
+.screen-list-item {
+  position: relative;
+}
+
+.screen-group-toggle.drop-before::before,
+.screen-group-toggle.drop-after::after,
+.screen-list-item.drop-before::before,
+.screen-list-item.drop-after::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  border-radius: 999px;
+  background: #3182f6;
+  pointer-events: none;
+}
+
+.screen-group-toggle.drop-before::before,
+.screen-list-item.drop-before::before {
+  top: 0;
+}
+
+.screen-group-toggle.drop-after::after,
+.screen-list-item.drop-after::after {
+  bottom: 0;
+}
+
 .screen-group-input {
   flex: 1;
   height: 32px;

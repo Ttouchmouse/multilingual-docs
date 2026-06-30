@@ -1,7 +1,7 @@
 import type { AppState, TranslationItem } from "./types";
-import { supabase, SUPABASE_BUCKET } from "./supabase";
+import { supabase, SUPABASE_BUCKET, SUPABASE_SNAPSHOT_ID } from "./supabase";
 
-const SNAPSHOT_ID = "default";
+const SNAPSHOT_ID = SUPABASE_SNAPSHOT_ID;
 const SNAPSHOT_TABLE = "app_snapshots";
 const SNAPSHOT_BACKUP_TABLE = "app_snapshot_backups";
 const SNAPSHOT_BACKUP_INTERVAL_MS = 10 * 60 * 1000;
@@ -320,7 +320,8 @@ export async function uploadScreenImage(screenId: string, dataUrl: string) {
   }
 
   const extension = getImageExtension(dataUrl);
-  const path = `screens/${screenId}/${getStorageSafeTimestamp()}.${extension}`;
+  const pathPrefix = SNAPSHOT_ID === "default" ? "" : `snapshots/${SNAPSHOT_ID}/`;
+  const path = `${pathPrefix}screens/${screenId}/${getStorageSafeTimestamp()}.${extension}`;
   const blob = dataUrlToBlob(dataUrl);
   const { error } = await supabase.storage.from(SUPABASE_BUCKET).upload(path, blob, {
     cacheControl: "3600",

@@ -4,6 +4,7 @@ const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
 export const SUPABASE_BUCKET = process.env.NEXT_PUBLIC_SUPABASE_STORAGE_BUCKET || "screen-images";
+export const SUPABASE_SNAPSHOT_ID = process.env.NEXT_PUBLIC_APP_SNAPSHOT_ID || "default";
 
 export const supabase =
   supabaseUrl && supabaseAnonKey

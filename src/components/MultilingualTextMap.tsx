@@ -104,6 +104,14 @@ type DeleteTarget =
   | { type: "group"; name: string }
   | { type: "screen"; screenId: string; name: string };
 
+type MenuDragItem =
+  | { type: "group"; group: string }
+  | { type: "screen"; screenId: string; group: string };
+
+type MenuDropTarget = MenuDragItem & {
+  position: "before" | "after";
+};
+
 type GlobalSearchMatch = {
   id: string;
   screen: Screen;
@@ -232,6 +240,49 @@ function replaceScreenRegions(allRegions: TextRegion[], screenId: string, nextSc
   });
 
   return inserted ? mergedRegions : [...mergedRegions, ...nextRegions];
+}
+
+function getOrderedGroupNames(state: AppState) {
+  const names: string[] = [];
+  const addName = (name: string) => {
+    if (names.includes(name)) return;
+    names.push(name);
+  };
+
+  for (const group of state.groups ?? []) {
+    addName(group);
+  }
+
+  for (const screen of state.screens) {
+    addName(getScreenGroup(screen));
+  }
+
+  return names;
+}
+
+function moveItemToPosition<T>(
+  items: T[],
+  sourceIndex: number,
+  targetIndex: number,
+  position: "before" | "after",
+) {
+  if (sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex) return items;
+
+  const item = items[sourceIndex];
+  const targetItem = items[targetIndex];
+  const nextItems = [...items];
+  nextItems.splice(sourceIndex, 1);
+
+  const nextTargetIndex = nextItems.indexOf(targetItem);
+  if (nextTargetIndex < 0) return items;
+
+  nextItems.splice(position === "after" ? nextTargetIndex + 1 : nextTargetIndex, 0, item);
+  return nextItems;
+}
+
+function getMenuDropPosition(event: React.DragEvent<HTMLElement>) {
+  const rect = event.currentTarget.getBoundingClientRect();
+  return event.clientY < rect.top + rect.height / 2 ? "before" : "after";
 }
 
 function readFileAsText(file: File) {
@@ -476,6 +527,8 @@ export function MultilingualTextMap() {
   const [editingCellValue, setEditingCellValue] = useState("");
   const [draggedRegionId, setDraggedRegionId] = useState<string>();
   const [dragOverRegionId, setDragOverRegionId] = useState<string>();
+  const [draggedMenuItem, setDraggedMenuItem] = useState<MenuDragItem | null>(null);
+  const [menuDropTarget, setMenuDropTarget] = useState<MenuDropTarget | null>(null);
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
   const [editingGroup, setEditingGroup] = useState<EditingGroup | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
@@ -556,7 +609,7 @@ export function MultilingualTextMap() {
       groups.set(group, [...(groups.get(group) ?? []), screen]);
     }
 
-    return Array.from(groups.entries()).sort(([a], [b]) => a.localeCompare(b));
+    return Array.from(groups.entries());
   }, [appState.groups, appState.screens]);
   const groupOptions = useMemo(() => {
     return Array.from(
@@ -1970,6 +2023,67 @@ export function MultilingualTextMap() {
     });
   }
 
+  function reorderGroup(sourceGroup: string, targetGroup: string, position: "before" | "after") {
+    if (sourceGroup === targetGroup) return;
+
+    setAppState((state) => {
+      const groupNames = getOrderedGroupNames(state);
+      const sourceIndex = groupNames.indexOf(sourceGroup);
+      const targetIndex = groupNames.indexOf(targetGroup);
+      if (sourceIndex < 0 || targetIndex < 0) return state;
+
+      return {
+        ...state,
+        groups: moveItemToPosition(groupNames, sourceIndex, targetIndex, position),
+      };
+    });
+  }
+
+  function reorderScreenInGroup(
+    sourceScreenId: string,
+    targetScreenId: string,
+    group: string,
+    position: "before" | "after",
+  ) {
+    if (sourceScreenId === targetScreenId) return;
+
+    setAppState((state) => {
+      const groupScreens = state.screens.filter((screen) => getScreenGroup(screen) === group);
+      const sourceIndex = groupScreens.findIndex((screen) => screen.id === sourceScreenId);
+      const targetIndex = groupScreens.findIndex((screen) => screen.id === targetScreenId);
+      if (sourceIndex < 0 || targetIndex < 0) return state;
+
+      const reorderedGroupScreens = moveItemToPosition(groupScreens, sourceIndex, targetIndex, position);
+      let groupScreenIndex = 0;
+
+      return {
+        ...state,
+        screens: state.screens.map((screen) =>
+          getScreenGroup(screen) === group ? reorderedGroupScreens[groupScreenIndex++] : screen,
+        ),
+      };
+    });
+  }
+
+  function handleMenuDrop(target: MenuDropTarget) {
+    if (!draggedMenuItem) return;
+
+    if (draggedMenuItem.type === "group" && target.type === "group") {
+      reorderGroup(draggedMenuItem.group, target.group, target.position);
+    }
+
+    if (
+      draggedMenuItem.type === "screen" &&
+      target.type === "screen" &&
+      draggedMenuItem.group === target.group
+    ) {
+      reorderScreenInGroup(draggedMenuItem.screenId, target.screenId, target.group, target.position);
+    }
+
+    setDraggedMenuItem(null);
+    setMenuDropTarget(null);
+  }
+
   function insertTableOnlyRegion(insertIndex: number, anchor?: DialogAnchor) {
     const now = new Date().toISOString();
     const screenId = mode === "add" ? DRAFT_SCREEN_ID : currentScreen?.id;
@@ -2974,9 +3088,15 @@ export function MultilingualTextMap() {
         <div className="screen-list">
           {groupedScreens.map(([group, screens]) => {
             const expanded = openGroups[group] ?? true;
+            const groupDragItem: MenuDragItem = { type: "group", group };
+            const isGroupDragging = draggedMenuItem?.type === "group" && draggedMenuItem.group === group;
+            const groupDropPosition =
+              menuDropTarget?.type === "group" && menuDropTarget.group === group
+                ? menuDropTarget.position
+                : undefined;
 
             return (
-              <section className="screen-group" key={group}>
+              <section className={`screen-group ${isGroupDragging ? "dragging" : ""}`} key={group}>
                 <div className="screen-group-head">
                   {editingGroup?.originalName === group ? (
                     <input
@@ -3001,8 +3121,35 @@ export function MultilingualTextMap() {
                   ) : (
                     <button
                       type="button"
-                      className="screen-group-toggle"
+                      className={`screen-group-toggle ${
+                        groupDropPosition ? `drop-${groupDropPosition}` : ""
+                      }`}
+                      draggable
                       onClick={() => setOpenGroups((groups) => ({ ...groups, [group]: !expanded }))}
+                      onDragStart={(event) => {
+                        setDraggedMenuItem(groupDragItem);
+                        event.dataTransfer.effectAllowed = "move";
+                        event.dataTransfer.setData("text/plain", `group:${group}`);
+                      }}
+                      onDragOver={(event) => {
+                        if (draggedMenuItem?.type !== "group" || draggedMenuItem.group === group) return;
+                        event.preventDefault();
+                        event.dataTransfer.dropEffect = "move";
+                        setMenuDropTarget({ ...groupDragItem, position: getMenuDropPosition(event) });
+                      }}
+                      onDragLeave={() => {
+                        if (menuDropTarget?.type === "group" && menuDropTarget.group === group) {
+                          setMenuDropTarget(null);
+                        }
+                      }}
+                      onDrop={(event) => {
+                        event.preventDefault();
+                        handleMenuDrop({ ...groupDragItem, position: getMenuDropPosition(event) });
+                      }}
+                      onDragEnd={() => {
+                        setDraggedMenuItem(null);
+                        setMenuDropTarget(null);
+                      }}
                       onContextMenu={(event) => {
                         event.preventDefault();
                         setDeleteTarget({ type: "group", name: group });
@@ -3035,12 +3182,52 @@ export function MultilingualTextMap() {
                   <div className="screen-group-items">
                     {screens.map((screen) => {
                       const active = screen.id === appState.activeScreenId;
+                      const screenDragItem: MenuDragItem = { type: "screen", screenId: screen.id, group };
+                      const isScreenDragging =
+                        draggedMenuItem?.type === "screen" && draggedMenuItem.screenId === screen.id;
+                      const isScreenDropTarget =
+                        menuDropTarget?.type === "screen" && menuDropTarget.screenId === screen.id;
+                      const screenDropPosition = isScreenDropTarget ? menuDropTarget.position : undefined;
 
                       return (
                         <button
                           type="button"
                           key={screen.id}
-                          className={`screen-list-item ${active ? "active" : ""}`}
+                          className={`screen-list-item ${active ? "active" : ""} ${
+                            isScreenDragging ? "dragging" : ""
+                          } ${screenDropPosition ? `drop-${screenDropPosition}` : ""}`}
+                          draggable
+                          onDragStart={(event) => {
+                            setDraggedMenuItem(screenDragItem);
+                            event.dataTransfer.effectAllowed = "move";
+                            event.dataTransfer.setData("text/plain", `screen:${screen.id}`);
+                          }}
+                          onDragOver={(event) => {
+                            if (
+                              draggedMenuItem?.type !== "screen" ||
+                              draggedMenuItem.group !== group ||
+                              draggedMenuItem.screenId === screen.id
+                            ) {
+                              return;
+                            }
+
+                            event.preventDefault();
+                            event.dataTransfer.dropEffect = "move";
+                            setMenuDropTarget({ ...screenDragItem, position: getMenuDropPosition(event) });
+                          }}
+                          onDragLeave={() => {
+                            if (menuDropTarget?.type === "screen" && menuDropTarget.screenId === screen.id) {
+                              setMenuDropTarget(null);
+                            }
+                          }}
+                          onDrop={(event) => {
+                            event.preventDefault();
+                            handleMenuDrop({ ...screenDragItem, position: getMenuDropPosition(event) });
+                          }}
+                          onDragEnd={() => {
+                            setDraggedMenuItem(null);
+                            setMenuDropTarget(null);
+                          }}
                           onContextMenu={(event) => {
                             event.preventDefault();
                             setDeleteTarget({ type: "screen", screenId: screen.id, name: screen.name });
