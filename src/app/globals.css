@@ -357,7 +357,7 @@ label {
   z-index: 140;
   display: flex;
   align-items: center;
-  gap: 8px;
+  column-gap: 4px;
   max-width: min(560px, calc(100vw - 40px));
   border: 1px solid #d0d6dd;
   border-radius: 8px;
@@ -1028,6 +1028,26 @@ label {
   font-weight: 700;
   line-height: 20px;
   text-align: left;
+}
+
+.screen-group-toggle strong {
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+  color: inherit;
+  font: inherit;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.screen-group-toggle em {
+  flex: 0 0 auto;
+  margin-left: -4px;
+  color: #8b95a1;
+  font-size: 14px;
+  font-style: normal;
+  font-weight: 600;
+  line-height: 18px;
 }
 
 .screen-group-toggle span {

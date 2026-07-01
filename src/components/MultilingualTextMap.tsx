@@ -1009,7 +1009,7 @@ export function MultilingualTextMap() {
             phase: "warning",
             message:
               data.supabaseStatus === "failed"
-                ? "Supabase 로드에 실패해 IndexedDB 캐시를 표시하고 있습니다. 새로고침 후 다시 확인해주세요."
+                ? "Supabase 로드에 실패해 IndexedDB 캐시를 표시하고 있습니다. 최신 데이터를 불러온 뒤 다시 확인해주세요."
                 : "Supabase 원본이 없어 IndexedDB 캐시를 표시하고 있습니다. 원본 저장은 차단됩니다.",
             recovery: "reload",
           });
@@ -1097,7 +1097,7 @@ export function MultilingualTextMap() {
       console.error("[persistence] Cloud-first save blocked because the Supabase source failed to load.");
       setPersistenceStatus({
         phase: "warning",
-        message: "Supabase 원본을 불러오지 못해 변경사항 저장이 차단되었습니다. 새로고침 후 다시 시도해주세요.",
+        message: "Supabase 원본을 불러오지 못해 변경사항 저장이 차단되었습니다. 최신 데이터를 불러온 뒤 다시 시도해주세요.",
         recovery: "reload",
       });
       return;
@@ -1106,7 +1106,7 @@ export function MultilingualTextMap() {
       console.error("[persistence] Cloud-first save blocked because the app is showing IndexedDB fallback data.");
       setPersistenceStatus({
         phase: "warning",
-        message: "로컬 캐시 데이터를 표시 중이라 Supabase 원본 저장이 차단되었습니다. 새로고침 후 다시 확인해주세요.",
+        message: "로컬 캐시 데이터를 표시 중이라 Supabase 원본 저장이 차단되었습니다. 최신 데이터를 불러온 뒤 다시 확인해주세요.",
         recovery: "reload",
       });
       return;
@@ -3223,7 +3223,8 @@ export function MultilingualTextMap() {
                       aria-expanded={expanded}
                     >
                       <span aria-hidden="true" />
-                      {group}
+                      <strong>{group}</strong>
+                      <em>{screens.length}</em>
                     </button>
                   )}
                   <button
@@ -3525,7 +3526,7 @@ export function MultilingualTextMap() {
         ) : null}
         {shouldReload ? (
           <button type="button" onClick={() => window.location.reload()}>
-            다시 불러오기
+            최신 데이터 불러오기
           </button>
         ) : null}
       </div>

@@ -31,7 +31,7 @@ type SupabaseErrorDetails = {
 
 export class SupabaseSnapshotConflictError extends Error {
   constructor() {
-    super("다른 사용자가 먼저 저장했습니다. 최신 데이터를 다시 불러온 뒤 작업해주세요.");
+    super("다른 곳에서 먼저 저장된 변경사항이 있어 현재 저장을 중단했습니다. 현재 작업을 유지하거나 최신 데이터를 불러올 수 있습니다.");
     this.name = "SupabaseSnapshotConflictError";
   }
 }
