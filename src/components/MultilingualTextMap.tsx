@@ -75,6 +75,8 @@ type ImageDraft = {
   imageUrl: string;
   imageWidth: number;
   imageHeight: number;
+  imageContentWidth: number;
+  imageContentHeight: number;
   fileName: string;
 };
 
@@ -82,6 +84,8 @@ type ImageTarget = {
   imageUrl: string;
   imageWidth: number;
   imageHeight: number;
+  imageContentWidth?: number;
+  imageContentHeight?: number;
   name: string;
 };
 
@@ -229,6 +233,27 @@ function scaleRegionsToImageSize(
   });
 }
 
+function getImageContentSize(image: Pick<ImageTarget, "imageWidth" | "imageHeight" | "imageContentWidth" | "imageContentHeight">) {
+  return {
+    width: image.imageContentWidth ?? image.imageWidth,
+    height: image.imageContentHeight ?? image.imageHeight,
+  };
+}
+
+function getRenderedImageContentHeight(
+  image: Pick<ImageTarget, "imageWidth" | "imageHeight" | "imageContentWidth" | "imageContentHeight">,
+) {
+  const content = getImageContentSize(image);
+  if (content.width <= 0) return image.imageHeight;
+  return (image.imageWidth * content.height) / content.width;
+}
+
+function getImageLetterboxHeight(
+  image: Pick<ImageTarget, "imageWidth" | "imageHeight" | "imageContentWidth" | "imageContentHeight">,
+) {
+  return Math.max(0, image.imageHeight - getRenderedImageContentHeight(image));
+}
+
 function replaceScreenRegions(allRegions: TextRegion[], screenId: string, nextScreenRegions: TextRegion[]) {
   let inserted = false;
   const nextRegions = cloneRegions(nextScreenRegions);
@@ -344,11 +369,16 @@ function loadImageSize(dataUrl: string) {
 
 async function cropImageRegion(imageTarget: ImageTarget, region: ImageRect) {
   const image = await loadImageElement(imageTarget.imageUrl);
+  const content = getImageContentSize(imageTarget);
   const scale = 2;
   const sourceX = Math.max(0, Math.round(region.x));
   const sourceY = Math.max(0, Math.round(region.y));
-  const sourceWidth = Math.max(1, Math.min(Math.round(region.width), imageTarget.imageWidth - sourceX));
-  const sourceHeight = Math.max(1, Math.min(Math.round(region.height), imageTarget.imageHeight - sourceY));
+  if (sourceX >= content.width || sourceY >= content.height) {
+    throw new Error("OCR 대상 영역이 현재 이미지 밖에 있습니다.");
+  }
+
+  const sourceWidth = Math.max(1, Math.min(Math.round(region.width), content.width - sourceX));
+  const sourceHeight = Math.max(1, Math.min(Math.round(region.height), content.height - sourceY));
   const canvas = document.createElement("canvas");
   canvas.width = sourceWidth * scale;
   canvas.height = sourceHeight * scale;
@@ -636,6 +666,8 @@ export function MultilingualTextMap() {
         imageUrl: imageDraft.imageUrl,
         imageWidth: imageDraft.imageWidth,
         imageHeight: imageDraft.imageHeight,
+        imageContentWidth: imageDraft.imageContentWidth,
+        imageContentHeight: imageDraft.imageContentHeight,
         name: screenForm.name || imageDraft.fileName,
       };
     }
@@ -645,6 +677,8 @@ export function MultilingualTextMap() {
         imageUrl: imageDraft.imageUrl,
         imageWidth: imageDraft.imageWidth,
         imageHeight: imageDraft.imageHeight,
+        imageContentWidth: imageDraft.imageContentWidth,
+        imageContentHeight: imageDraft.imageContentHeight,
         name: screenForm.name || imageDraft.fileName,
       };
     }
@@ -1567,10 +1601,21 @@ export function MultilingualTextMap() {
     const imageUrl = await readFileAsDataUrl(file);
     const size = await loadImageSize(imageUrl);
     const previousImage = imageDraft ?? currentScreen;
+    const nextCoordinateWidth = size.width;
+    const nextCoordinateHeight =
+      mode === "edit" && previousImage
+        ? Math.max(
+            size.height,
+            Math.round(previousImage.imageHeight * (previousImage.imageWidth > 0 ? size.width / previousImage.imageWidth : 1)),
+          )
+        : size.height;
+
     setImageDraft({
       imageUrl,
-      imageWidth: size.width,
-      imageHeight: size.height,
+      imageWidth: nextCoordinateWidth,
+      imageHeight: nextCoordinateHeight,
+      imageContentWidth: size.width,
+      imageContentHeight: size.height,
       fileName: file.name,
     });
     if (mode === "add") {
@@ -1582,8 +1627,8 @@ export function MultilingualTextMap() {
           editDraftRegions ?? regionsForScreen,
           previousImage.imageWidth,
           previousImage.imageHeight,
-          size.width,
-          size.height,
+          nextCoordinateWidth,
+          nextCoordinateHeight,
         ),
       );
     }
@@ -1818,6 +1863,8 @@ export function MultilingualTextMap() {
         imageStoragePath: uploadedImage?.imageStoragePath,
         imageWidth: imageDraft.imageWidth,
         imageHeight: imageDraft.imageHeight,
+        imageContentWidth: imageDraft.imageContentWidth,
+        imageContentHeight: imageDraft.imageContentHeight,
         memo: screenForm.memo.trim(),
         createdAt: now,
         updatedAt: now,
@@ -1883,6 +1930,8 @@ export function MultilingualTextMap() {
               imageStoragePath: uploadedImage?.imageStoragePath ?? screen.imageStoragePath,
               imageWidth: imageDraft?.imageWidth ?? screen.imageWidth,
               imageHeight: imageDraft?.imageHeight ?? screen.imageHeight,
+              imageContentWidth: imageDraft?.imageContentWidth ?? screen.imageContentWidth,
+              imageContentHeight: imageDraft?.imageContentHeight ?? screen.imageContentHeight,
               updatedAt: now,
             }
           : screen,
@@ -2591,10 +2640,17 @@ export function MultilingualTextMap() {
       );
     }
 
+    const letterboxHeight = getImageLetterboxHeight(currentScreen);
+
     return (
       <div className="image-frame" style={{ width: isEditing ? "100%" : "360px" }}>
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img src={currentScreen.imageUrl} alt={currentScreen.name} />
+        {letterboxHeight > 0 ? (
+          <div className="image-letterbox" style={{ aspectRatio: `${currentScreen.imageWidth} / ${letterboxHeight}` }}>
+            <span>이전 이미지 영역</span>
+          </div>
+        ) : null}
         <div ref={overlayRef} className="region-layer" onPointerDown={startDrawing}>
           {regionsForScreen.filter(isScreenRegion).map((region) => {
             const linked = Boolean(region.translationItemId);
@@ -2664,11 +2720,17 @@ export function MultilingualTextMap() {
 
     const previewRegions = mode === "add" ? draftRegions : editDraftRegions ?? regionsForScreen;
     const coordinateImage = imageDraft;
+    const letterboxHeight = getImageLetterboxHeight(coordinateImage);
 
     return (
       <div className="image-frame add-image-frame">
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img src={imageDraft.imageUrl} alt={screenForm.name || imageDraft.fileName} />
+        {letterboxHeight > 0 ? (
+          <div className="image-letterbox" style={{ aspectRatio: `${coordinateImage.imageWidth} / ${letterboxHeight}` }}>
+            <span>이전 이미지 영역</span>
+          </div>
+        ) : null}
         <div ref={overlayRef} className="region-layer" onPointerDown={startDrawing}>
           {previewRegions.filter(isScreenRegion).map((region) => {
             const linked = Boolean(region.translationItemId);
@@ -3572,7 +3634,10 @@ export function MultilingualTextMap() {
           hidden
           type="file"
           accept="image/*"
-          onChange={(event) => handleImageDraft(event.target.files?.[0])}
+          onChange={(event) => {
+            void handleImageDraft(event.target.files?.[0]);
+            event.currentTarget.value = "";
+          }}
         />
 
         <div className="add-mode-title">
@@ -3588,6 +3653,16 @@ export function MultilingualTextMap() {
           }}
           className={`add-screen-pane ${hasScreenImage ? "has-image" : ""}`}
         >
+          {hasScreenImage ? (
+            <button
+              type="button"
+              className="add-image-replace-button"
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={() => imageFileInputRef.current?.click()}
+            >
+              교체
+            </button>
+          ) : null}
           {imageDraft ? (
             renderAddScreenPreview()
           ) : isEditMode && currentScreen ? (

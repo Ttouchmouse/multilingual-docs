@@ -56,6 +56,8 @@ export type Screen = {
   imageStoragePath?: string;
   imageWidth: number;
   imageHeight: number;
+  imageContentWidth?: number;
+  imageContentHeight?: number;
   memo: string;
   createdAt: string;
   updatedAt: string;
