@@ -80,6 +80,15 @@ type ImageDraft = {
   fileName: string;
 };
 
+const IMAGE_MAX_BYTES = 15 * 1024 * 1024;
+const TRANSLATION_MAX_BYTES = 30 * 1024 * 1024;
+const IMAGE_ACCEPT = ".png,.jpg,.jpeg,.webp,.gif,image/png,image/jpeg,image/webp,image/gif";
+const TRANSLATION_ACCEPT =
+  ".html,.htm,text/html,.csv,text/csv,.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+const ALLOWED_IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "webp", "gif"]);
+const ALLOWED_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+const ALLOWED_TRANSLATION_EXTENSIONS = new Set(["html", "htm", "csv", "xlsx"]);
+
 function SupabaseLoadingLogo() {
   return (
     <svg
@@ -392,6 +401,44 @@ function readFileAsArrayBuffer(file: File) {
     reader.onerror = () => reject(reader.error);
     reader.readAsArrayBuffer(file);
   });
+}
+
+function formatFileSize(bytes: number) {
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
+  if (bytes >= 1024) return `${Math.ceil(bytes / 1024)}KB`;
+  return `${bytes}B`;
+}
+
+function getFileExtension(fileName: string) {
+  return fileName.split(".").pop()?.toLowerCase() ?? "";
+}
+
+function getImageValidationError(file: File) {
+  const extension = getFileExtension(file.name);
+  if (file.size > IMAGE_MAX_BYTES) {
+    return `이미지는 최대 ${formatFileSize(IMAGE_MAX_BYTES)}까지 업로드할 수 있습니다.`;
+  }
+  if (file.type && !ALLOWED_IMAGE_TYPES.has(file.type)) {
+    return "지원하지 않는 이미지 형식입니다. PNG, JPG, WEBP, GIF만 사용할 수 있습니다.";
+  }
+  if (extension && !ALLOWED_IMAGE_EXTENSIONS.has(extension)) {
+    return "지원하지 않는 이미지 확장자입니다. PNG, JPG, WEBP, GIF만 사용할 수 있습니다.";
+  }
+  if (!file.type && !extension) {
+    return "이미지 형식을 확인할 수 없습니다. PNG, JPG, WEBP, GIF 파일을 사용해주세요.";
+  }
+  return undefined;
+}
+
+function getTranslationFileValidationError(file: File) {
+  const extension = getFileExtension(file.name);
+  if (file.size > TRANSLATION_MAX_BYTES) {
+    return `번역 파일은 최대 ${formatFileSize(TRANSLATION_MAX_BYTES)}까지 업로드할 수 있습니다.`;
+  }
+  if (!ALLOWED_TRANSLATION_EXTENSIONS.has(extension)) {
+    return "지원하지 않는 번역 파일입니다. HTML, CSV, XLSX 파일만 업로드할 수 있습니다.";
+  }
+  return undefined;
 }
 
 function getClipboardImageFile(event: ClipboardEvent) {
@@ -1569,11 +1616,20 @@ export function MultilingualTextMap() {
   async function handleTranslationFileUpload(file?: File) {
     if (!file) return;
 
+    const validationError = getTranslationFileValidationError(file);
+    if (validationError) {
+      setParseMessage(`업로드 실패: ${validationError}`);
+      if (translationFileInputRef.current) {
+        translationFileInputRef.current.value = "";
+      }
+      return;
+    }
+
     setIsParsing(true);
     setParseMessage("번역 파일을 파싱 중입니다.");
 
     try {
-      const extension = file.name.split(".").pop()?.toLowerCase();
+      const extension = getFileExtension(file.name);
       const result =
         extension === "xlsx"
           ? parseTranslationXlsx(await readFileAsArrayBuffer(file), file.name)
@@ -1664,6 +1720,11 @@ export function MultilingualTextMap() {
   async function handleImageDraft(file?: File) {
     if (!file) return;
 
+    const validationError = getImageValidationError(file);
+    if (validationError) {
+      throw new Error(validationError);
+    }
+
     const imageUrl = await readFileAsDataUrl(file);
     const size = await loadImageSize(imageUrl);
     const previousImage = imageDraft ?? currentScreen;
@@ -1706,6 +1767,14 @@ export function MultilingualTextMap() {
     }
   }
 
+  function handleImageFileInput(file?: File) {
+    void handleImageDraft(file).catch((error) => {
+      const message = error instanceof Error ? error.message : "이미지를 업로드할 수 없습니다.";
+      setCopyFeedback({ id: Date.now(), message });
+      console.error("[image] Failed to apply image.", error);
+    });
+  }
+
   useEffect(() => {
     if (!isEditing) return;
 
@@ -1719,8 +1788,9 @@ export function MultilingualTextMap() {
           setCopyFeedback({ id: Date.now(), message: "붙여넣은 이미지를 적용했습니다." });
         })
         .catch((error) => {
+          const message = error instanceof Error ? error.message : "이미지 붙여넣기에 실패했습니다.";
           console.error("[image] Failed to apply pasted image.", error);
-          setCopyFeedback({ id: Date.now(), message: "이미지 붙여넣기에 실패했습니다." });
+          setCopyFeedback({ id: Date.now(), message });
         });
     };
 
@@ -3408,7 +3478,7 @@ export function MultilingualTextMap() {
             ref={translationFileInputRef}
             hidden
             type="file"
-            accept=".html,text/html,.csv,text/csv,.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            accept={TRANSLATION_ACCEPT}
             onChange={(event) => handleTranslationFileUpload(event.target.files?.[0])}
           />
 
@@ -3706,9 +3776,9 @@ export function MultilingualTextMap() {
           ref={imageFileInputRef}
           hidden
           type="file"
-          accept="image/*"
+          accept={IMAGE_ACCEPT}
           onChange={(event) => {
-            void handleImageDraft(event.target.files?.[0]);
+            handleImageFileInput(event.target.files?.[0]);
             event.currentTarget.value = "";
           }}
         />
@@ -3998,7 +4068,14 @@ export function MultilingualTextMap() {
               </label>
               <label className="upload-box">
                 화면 이미지 업로드
-                <input type="file" accept="image/*" onChange={(event) => handleImageDraft(event.target.files?.[0])} />
+                <input
+                  type="file"
+                  accept={IMAGE_ACCEPT}
+                  onChange={(event) => {
+                    handleImageFileInput(event.target.files?.[0]);
+                    event.currentTarget.value = "";
+                  }}
+                />
               </label>
               <button
                 type="button"
@@ -4020,8 +4097,11 @@ export function MultilingualTextMap() {
                   <input
                     hidden
                     type="file"
-                    accept=".html,text/html,.csv,text/csv,.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    onChange={(event) => handleTranslationFileUpload(event.target.files?.[0])}
+                    accept={TRANSLATION_ACCEPT}
+                    onChange={(event) => {
+                      void handleTranslationFileUpload(event.target.files?.[0]);
+                      event.currentTarget.value = "";
+                    }}
                   />
                 </label>
               </div>
