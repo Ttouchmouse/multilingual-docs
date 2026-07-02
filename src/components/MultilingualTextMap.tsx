@@ -80,6 +80,63 @@ type ImageDraft = {
   fileName: string;
 };
 
+function SupabaseLoadingLogo() {
+  return (
+    <svg
+      className="supabase-loading-logo"
+      width="27"
+      height="28"
+      viewBox="0 0 27 28"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+      aria-hidden="true"
+    >
+      <g clipPath="url(#supabase-loading-clip)">
+        <path
+          d="M15.7859 27.3267C15.0774 28.219 13.6407 27.7301 13.6237 26.5908L13.374 9.92676H24.5789C26.6084 9.92676 27.7403 12.2709 26.4783 13.8603L15.7859 27.3267Z"
+          fill="url(#supabase-loading-gradient-primary)"
+        />
+        <path
+          d="M15.7859 27.3267C15.0774 28.219 13.6407 27.7301 13.6237 26.5908L13.374 9.92676H24.5789C26.6084 9.92676 27.7403 12.2709 26.4783 13.8603L15.7859 27.3267Z"
+          fill="url(#supabase-loading-gradient-shadow)"
+          fillOpacity="0.2"
+        />
+        <path
+          d="M11.2287 0.512605C11.9373 -0.379777 13.374 0.109184 13.391 1.24853L13.5004 17.9125H2.43578C0.406215 17.9125 -0.725711 15.5684 0.536333 13.979L11.2287 0.512605Z"
+          fill="#3ECF8E"
+        />
+      </g>
+      <defs>
+        <linearGradient
+          id="supabase-loading-gradient-primary"
+          x1="13.374"
+          y1="13.6216"
+          x2="23.3325"
+          y2="17.7982"
+          gradientUnits="userSpaceOnUse"
+        >
+          <stop stopColor="#249361" />
+          <stop offset="1" stopColor="#3ECF8E" />
+        </linearGradient>
+        <linearGradient
+          id="supabase-loading-gradient-shadow"
+          x1="8.95894"
+          y1="7.57657"
+          x2="13.5005"
+          y2="16.1259"
+          gradientUnits="userSpaceOnUse"
+        >
+          <stop />
+          <stop offset="1" stopOpacity="0" />
+        </linearGradient>
+        <clipPath id="supabase-loading-clip">
+          <rect width="27.0089" height="28" fill="white" />
+        </clipPath>
+      </defs>
+    </svg>
+  );
+}
+
 type ImageTarget = {
   imageUrl: string;
   imageWidth: number;
@@ -3507,6 +3564,15 @@ export function MultilingualTextMap() {
 
   function renderPersistenceStatus(placement: "floating" | "header" = "floating") {
     if (persistenceStatus.phase === "ready") return null;
+
+    if (placement === "header" && persistenceStatus.phase === "loading") {
+      return (
+        <div className="supabase-loading-status" role="status" aria-live="polite">
+          <SupabaseLoadingLogo />
+          <span>데이터 불러오는 중</span>
+        </div>
+      );
+    }
 
     const canRetrySave = isLoaded && persistenceStatus.recovery === "save";
     const shouldReload = isLoaded && persistenceStatus.recovery === "reload";

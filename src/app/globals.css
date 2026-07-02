@@ -121,6 +121,30 @@ label {
   gap: 12px;
 }
 
+.supabase-loading-status {
+  flex: 0 0 auto;
+  width: auto;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #141414;
+  font-family: "SF Pro", "Pretendard JP", Pretendard, system-ui, sans-serif;
+  font-size: 13px;
+  font-weight: 590;
+  line-height: 16px;
+  letter-spacing: 0;
+  white-space: nowrap;
+  animation: supabase-loading-fade 1.35s ease-in-out infinite;
+}
+
+.supabase-loading-logo {
+  width: 19.29px;
+  height: 20px;
+  flex: 0 0 19.29px;
+  display: block;
+}
+
 .translation-source-button {
   flex: 0 0 auto;
   height: 32px;
@@ -480,6 +504,16 @@ label {
   0%,
   100% {
     opacity: 0.45;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@keyframes supabase-loading-fade {
+  0%,
+  100% {
+    opacity: 0.38;
   }
   50% {
     opacity: 1;
