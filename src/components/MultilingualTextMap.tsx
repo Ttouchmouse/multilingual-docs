@@ -535,6 +535,7 @@ function SelectChevronIcon() {
 
 export function MultilingualTextMap() {
   const [appState, setAppState] = useState<AppState>(getInitialAppState);
+  const [selectedScreenId, setSelectedScreenId] = useState<string>();
   const [translations, setTranslations] = useState<TranslationItem[]>([]);
   const [isLoaded, setIsLoaded] = useState(false);
   const [isParsing, setIsParsing] = useState(false);
@@ -623,7 +624,7 @@ export function MultilingualTextMap() {
     () => translations.filter((item) => enabledSourceIds.has(item.sourceId)),
     [enabledSourceIds, translations],
   );
-  const currentScreen = appState.screens.find((screen) => screen.id === appState.activeScreenId);
+  const currentScreen = appState.screens.find((screen) => screen.id === selectedScreenId);
   const screenById = useMemo(() => {
     return new Map(appState.screens.map((screen) => [screen.id, screen]));
   }, [appState.screens]);
@@ -797,8 +798,8 @@ export function MultilingualTextMap() {
   }, [appState.regions, draftRegions, translationsById]);
 
   const regionsForScreen = useMemo(
-    () => appState.regions.filter((region) => region.screenId === appState.activeScreenId),
-    [appState.activeScreenId, appState.regions],
+    () => appState.regions.filter((region) => region.screenId === selectedScreenId),
+    [appState.regions, selectedScreenId],
   );
 
   const activeRegions = mode === "add" ? draftRegions : editDraftRegions ?? regionsForScreen;
@@ -980,9 +981,10 @@ export function MultilingualTextMap() {
       .then((data) => {
         if (!active) return;
         const loadedState = data.appState;
-        if (!loadedState.activeScreenId && loadedState.screens[0]) {
-          loadedState.activeScreenId = loadedState.screens[0].id;
-        }
+        const initialScreenId =
+          loadedState.screens.find((screen) => screen.id === loadedState.activeScreenId)?.id ??
+          loadedState.screens[0]?.id;
+        const stateForView = { ...loadedState, activeScreenId: undefined };
         persistedDataSourceRef.current = data.source;
         supabaseLoadStatusRef.current = data.supabaseStatus;
         supabaseSnapshotUpdatedAtRef.current = data.supabaseUpdatedAt;
@@ -991,13 +993,14 @@ export function MultilingualTextMap() {
           source: data.source,
           supabaseStatus: data.supabaseStatus,
           supabaseUpdatedAt: data.supabaseUpdatedAt,
-          activeScreenId: loadedState.activeScreenId,
+          selectedScreenId: initialScreenId,
           screens: loadedState.screens.length,
           regions: loadedState.regions.length,
           sources: loadedState.sources?.length ?? 0,
           translations: data.translations.length,
         });
-        setAppState(loadedState);
+        setAppState(stateForView);
+        setSelectedScreenId(initialScreenId);
         setTranslations(data.translations);
         if (data.supabaseStatus === "success") {
           setPersistenceStatus({
@@ -1047,6 +1050,12 @@ export function MultilingualTextMap() {
     openGroupsLoadedRef.current = true;
     setOpenGroups(loadStoredOpenGroups());
   }, []);
+
+  useEffect(() => {
+    if (!isLoaded) return;
+    if (selectedScreenId && appState.screens.some((screen) => screen.id === selectedScreenId)) return;
+    setSelectedScreenId(appState.screens[0]?.id);
+  }, [appState.screens, isLoaded, selectedScreenId]);
 
   useEffect(() => {
     if (!openGroupsLoadedRef.current) return;
@@ -1760,34 +1769,38 @@ export function MultilingualTextMap() {
     if (deleteTarget.type === "screen") {
       setAppState((state) => {
         const nextScreens = state.screens.filter((screen) => screen.id !== deleteTarget.screenId);
-        const nextActiveScreenId =
-          state.activeScreenId === deleteTarget.screenId ? nextScreens[0]?.id : state.activeScreenId;
 
         return {
           ...state,
           screens: nextScreens,
           regions: state.regions.filter((region) => region.screenId !== deleteTarget.screenId),
-          activeScreenId: nextActiveScreenId,
         };
       });
+      if (selectedScreenId === deleteTarget.screenId) {
+        const nextScreen = appState.screens.find((screen) => screen.id !== deleteTarget.screenId);
+        setSelectedScreenId(nextScreen?.id);
+      }
     } else {
       setAppState((state) => {
         const deletedScreenIds = new Set(
           state.screens.filter((screen) => getScreenGroup(screen) === deleteTarget.name).map((screen) => screen.id),
         );
         const nextScreens = state.screens.filter((screen) => getScreenGroup(screen) !== deleteTarget.name);
-        const nextActiveScreenId = deletedScreenIds.has(state.activeScreenId ?? "")
-          ? nextScreens[0]?.id
-          : state.activeScreenId;
 
         return {
           ...state,
           groups: (state.groups ?? []).filter((group) => group !== deleteTarget.name),
           screens: nextScreens,
           regions: state.regions.filter((region) => !deletedScreenIds.has(region.screenId)),
-          activeScreenId: nextActiveScreenId,
         };
       });
+      const deletedScreenIds = new Set(
+        appState.screens.filter((screen) => getScreenGroup(screen) === deleteTarget.name).map((screen) => screen.id),
+      );
+      if (deletedScreenIds.has(selectedScreenId ?? "")) {
+        const nextScreen = appState.screens.find((screen) => !deletedScreenIds.has(screen.id));
+        setSelectedScreenId(nextScreen?.id);
+      }
       setOpenGroups((groups) => {
         const { [deleteTarget.name]: _deleted, ...rest } = groups;
         return rest;
@@ -1882,8 +1895,8 @@ export function MultilingualTextMap() {
             updatedAt: now,
           })),
         ],
-        activeScreenId: screen.id,
       }));
+      setSelectedScreenId(screen.id);
       consumeAddHistoryEntry();
       setMode("view");
       setScreenForm(defaultScreenForm);
@@ -2334,14 +2347,7 @@ export function MultilingualTextMap() {
     setPendingGlobalFocusRegionId(match.region.id);
     setSelectedRegionId(match.region.id);
     setOpenGroups((groups) => ({ ...groups, [getScreenGroup(match.screen)]: true }));
-    setAppState((state) =>
-      state.activeScreenId === match.screen.id
-        ? state
-        : {
-            ...state,
-            activeScreenId: match.screen.id,
-          },
-    );
+    setSelectedScreenId(match.screen.id);
   }
 
   function renderHighlightedSearchValue(value: string) {
@@ -3244,7 +3250,7 @@ export function MultilingualTextMap() {
                 {expanded ? (
                   <div className="screen-group-items">
                     {screens.map((screen) => {
-                      const active = screen.id === appState.activeScreenId;
+                      const active = screen.id === selectedScreenId;
                       const screenDragItem: MenuDragItem = { type: "screen", screenId: screen.id, group };
                       const isScreenDragging =
                         draggedMenuItem?.type === "screen" && draggedMenuItem.screenId === screen.id;
@@ -3296,7 +3302,7 @@ export function MultilingualTextMap() {
                             setDeleteTarget({ type: "screen", screenId: screen.id, name: screen.name });
                           }}
                           onClick={() => {
-                            setAppState((state) => ({ ...state, activeScreenId: screen.id }));
+                            setSelectedScreenId(screen.id);
                             setSelectedRegionId(undefined);
                           }}
                         >
