@@ -94,7 +94,7 @@ export async function loadSupabaseSnapshot() {
 
 export async function saveSupabaseSnapshot(
   appState: AppState,
-  translations: TranslationItem[],
+  translations: TranslationItem[] | undefined,
   expectedUpdatedAt?: string,
 ) {
   const response = await fetch("/api/snapshot", {

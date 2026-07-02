@@ -290,7 +290,7 @@ async function backupCurrentSnapshotIfDue() {
 
 export async function saveServerSupabaseSnapshot(
   appState: AppState,
-  translations: TranslationItem[],
+  translations: TranslationItem[] | undefined,
   expectedUpdatedAt?: string,
   attempt = 1,
 ): Promise<{ updatedAt?: string }> {
@@ -307,35 +307,38 @@ export async function saveServerSupabaseSnapshot(
     screens: appState.screens.length,
     regions: appState.regions.length,
     sources: appState.sources?.length ?? 0,
-    translations: translations.length,
+    translations: translations?.length ?? "unchanged",
     expectedUpdatedAt,
   });
 
   await backupCurrentSnapshotIfDue();
   const nextUpdatedAt = new Date().toISOString();
 
+  const updatePayload = {
+          owner_id: null,
+          app_state: appState,
+          updated_at: nextUpdatedAt,
+          ...(translations ? { translations } : {}),
+        };
+  const upsertPayload = {
+          id: snapshotId,
+          owner_id: null,
+          app_state: appState,
+          translations: translations ?? [],
+          updated_at: nextUpdatedAt,
+        };
+
   const saveResult = expectedUpdatedAt
     ? await supabase
         .from(SNAPSHOT_TABLE)
-        .update({
-          owner_id: null,
-          app_state: appState,
-          translations,
-          updated_at: nextUpdatedAt,
-        })
+        .update(updatePayload)
         .eq("id", snapshotId)
         .eq("updated_at", expectedUpdatedAt)
         .select("updated_at")
         .maybeSingle<{ updated_at: string }>()
     : await supabase
         .from(SNAPSHOT_TABLE)
-        .upsert({
-          id: snapshotId,
-          owner_id: null,
-          app_state: appState,
-          translations,
-          updated_at: nextUpdatedAt,
-        })
+        .upsert(upsertPayload)
         .select("updated_at")
         .single<{ updated_at: string }>();
 

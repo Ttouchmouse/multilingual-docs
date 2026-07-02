@@ -16,11 +16,13 @@ export type SupabaseLoadStatus = "success" | "empty" | "failed" | "unconfigured"
 type PersistedSnapshot = {
   appState: AppState;
   translations: TranslationItem[];
+  translationsChanged: boolean;
   expectedUpdatedAt?: string;
 };
 
 let pendingPersistedSnapshot: PersistedSnapshot | undefined;
 let persistedSaveLoop: Promise<{ updatedAt?: string }> | null = null;
+let lastPersistedTranslationsSignature: string | undefined;
 
 function openDatabase() {
   return new Promise<IDBDatabase>((resolve, reject) => {
@@ -128,6 +130,12 @@ function hasPersistedData(appState: AppState | undefined, translations: Translat
   );
 }
 
+function getTranslationsSignature(translations: TranslationItem[]) {
+  return translations
+    .map((item) => `${item.id}:${item.sourceId}:${item.key}:${item.updatedAt}`)
+    .join("|");
+}
+
 export async function loadPersistedData() {
   let supabaseStatus: SupabaseLoadStatus = "unconfigured";
 
@@ -137,6 +145,7 @@ export async function loadPersistedData() {
       supabaseStatus = "success";
       const normalizedCloudState = normalizeAppState(cloudData.appState);
       const cloudTranslations = cloudData.translations ?? [];
+      lastPersistedTranslationsSignature = getTranslationsSignature(cloudTranslations);
       console.info("[persistence] Supabase snapshot loaded", {
         screens: normalizedCloudState.screens.length,
         regions: normalizedCloudState.regions.length,
@@ -171,6 +180,9 @@ export async function loadPersistedData() {
   ]);
   const normalizedLocalState = normalizeAppState(appState);
   const localTranslations = translations ?? [];
+  lastPersistedTranslationsSignature = hasPersistedData(normalizedLocalState, localTranslations)
+    ? getTranslationsSignature(localTranslations)
+    : undefined;
   const source: PersistedDataSource = hasPersistedData(normalizedLocalState, localTranslations) ? "indexeddb" : "empty";
 
   console.info("[persistence] Local IndexedDB load result", {
@@ -192,7 +204,9 @@ export async function loadPersistedData() {
 }
 
 export function savePersistedData(appState: AppState, translations: TranslationItem[], expectedUpdatedAt?: string) {
-  pendingPersistedSnapshot = { appState, translations, expectedUpdatedAt };
+  const translationsSignature = getTranslationsSignature(translations);
+  const translationsChanged = translationsSignature !== lastPersistedTranslationsSignature;
+  pendingPersistedSnapshot = { appState, translations, translationsChanged, expectedUpdatedAt };
 
   if (persistedSaveLoop) {
     console.info("[persistence] Save already in progress. Queued latest application snapshot.");
@@ -212,15 +226,19 @@ export function savePersistedData(appState: AppState, translations: TranslationI
         regions: snapshot.appState.regions.length,
         sources: snapshot.appState.sources?.length ?? 0,
         translations: snapshot.translations.length,
+        translationsChanged: snapshot.translationsChanged,
         expectedUpdatedAt: snapshotExpectedUpdatedAt,
       });
 
       const saveResult = await saveSupabaseSnapshot(
         snapshot.appState,
-        snapshot.translations,
+        snapshot.translationsChanged ? snapshot.translations : undefined,
         snapshotExpectedUpdatedAt,
       );
       latestUpdatedAt = saveResult.updatedAt ?? latestUpdatedAt;
+      if (snapshot.translationsChanged) {
+        lastPersistedTranslationsSignature = getTranslationsSignature(snapshot.translations);
+      }
       await Promise.all([
         setValue(APP_STATE_KEY, snapshot.appState),
         setValue(TRANSLATIONS_KEY, snapshot.translations),

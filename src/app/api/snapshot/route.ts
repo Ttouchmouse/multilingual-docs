@@ -55,7 +55,7 @@ export async function PUT(request: NextRequest) {
 
   try {
     const body = (await request.json()) as SaveSnapshotBody;
-    if (!body.appState || !Array.isArray(body.translations)) {
+    if (!body.appState || (body.translations !== undefined && !Array.isArray(body.translations))) {
       return NextResponse.json({ error: "저장할 스냅샷 데이터가 올바르지 않습니다." }, { status: 400 });
     }
 
