@@ -3,6 +3,7 @@
 import { type FormEvent, type ReactNode, useEffect, useState } from "react";
 
 const ACCESS_SESSION_KEY = "tg-access-code-version";
+const ACCESS_LOCAL_KEY = "tg-access-code-version";
 
 type AccessStatus =
   | { phase: "checking" }
@@ -13,6 +14,7 @@ type AccessStatusResponse = {
   enabled?: boolean;
   version?: string;
   ok?: boolean;
+  authorized?: boolean;
 };
 
 export function AppAccessGate({ children }: { children: ReactNode }) {
@@ -35,8 +37,11 @@ export function AppAccessGate({ children }: { children: ReactNode }) {
         }
 
         const version = payload.version ?? "";
+        const storedPersistentVersion = window.localStorage.getItem(ACCESS_LOCAL_KEY);
         const storedVersion = window.sessionStorage.getItem(ACCESS_SESSION_KEY);
-        if (storedVersion && storedVersion === version) {
+        if (payload.authorized && (storedPersistentVersion === version || storedVersion === version)) {
+          window.localStorage.setItem(ACCESS_LOCAL_KEY, version);
+          window.sessionStorage.setItem(ACCESS_SESSION_KEY, version);
           if (!cancelled) setAccessStatus({ phase: "unlocked" });
           return;
         }
@@ -74,6 +79,7 @@ export function AppAccessGate({ children }: { children: ReactNode }) {
       }
 
       window.sessionStorage.setItem(ACCESS_SESSION_KEY, payload.version);
+      window.localStorage.setItem(ACCESS_LOCAL_KEY, payload.version);
       setAccessStatus({ phase: "unlocked" });
     } catch (error) {
       const message = error instanceof Error ? error.message : "보안 키를 확인해주세요.";

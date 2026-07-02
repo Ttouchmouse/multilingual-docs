@@ -1,6 +1,9 @@
 import type { AppState, TranslationItem, TranslationSource } from "./types";
-import { isSupabaseConfigured } from "./supabase";
-import { loadSupabaseSnapshot, saveSupabaseSnapshot } from "./supabase-storage";
+import {
+  loadSupabaseSnapshot,
+  saveSupabaseSnapshot,
+  SupabaseSnapshotUnavailableError,
+} from "./supabase-storage";
 
 const DB_NAME = "multilingual-text-map";
 const STORE_NAME = "kv";
@@ -128,42 +131,38 @@ function hasPersistedData(appState: AppState | undefined, translations: Translat
 export async function loadPersistedData() {
   let supabaseStatus: SupabaseLoadStatus = "unconfigured";
 
-  if (isSupabaseConfigured) {
-    try {
-      const cloudData = await loadSupabaseSnapshot();
-      if (cloudData) {
-        supabaseStatus = "success";
-        const normalizedCloudState = normalizeAppState(cloudData.appState);
-        const cloudTranslations = cloudData.translations ?? [];
-        console.info("[persistence] Supabase snapshot loaded", {
-          screens: normalizedCloudState.screens.length,
-          regions: normalizedCloudState.regions.length,
-          sources: normalizedCloudState.sources?.length ?? 0,
-          translations: cloudTranslations.length,
-        });
+  try {
+    const cloudData = await loadSupabaseSnapshot();
+    if (cloudData) {
+      supabaseStatus = "success";
+      const normalizedCloudState = normalizeAppState(cloudData.appState);
+      const cloudTranslations = cloudData.translations ?? [];
+      console.info("[persistence] Supabase snapshot loaded", {
+        screens: normalizedCloudState.screens.length,
+        regions: normalizedCloudState.regions.length,
+        sources: normalizedCloudState.sources?.length ?? 0,
+        translations: cloudTranslations.length,
+      });
 
-        await Promise.all([
-          setValue(APP_STATE_KEY, normalizedCloudState),
-          setValue(TRANSLATIONS_KEY, cloudTranslations),
-        ]);
-        console.info("[persistence] IndexedDB cache refreshed from Supabase snapshot.");
+      await Promise.all([
+        setValue(APP_STATE_KEY, normalizedCloudState),
+        setValue(TRANSLATIONS_KEY, cloudTranslations),
+      ]);
+      console.info("[persistence] IndexedDB cache refreshed from Supabase snapshot.");
 
-        return {
-          appState: normalizedCloudState,
-          translations: cloudTranslations,
-          source: "supabase" as PersistedDataSource,
-          supabaseStatus,
-          supabaseUpdatedAt: cloudData.updatedAt,
-        };
-      }
-      supabaseStatus = "empty";
-      console.info("[persistence] Supabase snapshot not found. Checking IndexedDB fallback.");
-    } catch (error) {
-      supabaseStatus = "failed";
-      console.error("[persistence] Supabase load failed. Falling back to local IndexedDB.", error);
+      return {
+        appState: normalizedCloudState,
+        translations: cloudTranslations,
+        source: "supabase" as PersistedDataSource,
+        supabaseStatus,
+        supabaseUpdatedAt: cloudData.updatedAt,
+      };
     }
-  } else {
-    console.warn("[persistence] Supabase is not configured. Checking IndexedDB fallback.");
+    supabaseStatus = "empty";
+    console.info("[persistence] Supabase snapshot not found. Checking IndexedDB fallback.");
+  } catch (error) {
+    supabaseStatus = error instanceof SupabaseSnapshotUnavailableError ? "unconfigured" : "failed";
+    console.error("[persistence] Supabase load failed. Falling back to local IndexedDB.", error);
   }
 
   const [appState, translations] = await Promise.all([
@@ -207,10 +206,6 @@ export function savePersistedData(appState: AppState, translations: TranslationI
       const snapshot = pendingPersistedSnapshot;
       pendingPersistedSnapshot = undefined;
       const snapshotExpectedUpdatedAt = latestUpdatedAt ?? snapshot.expectedUpdatedAt;
-
-      if (!isSupabaseConfigured) {
-        throw new Error("Supabase 환경변수가 설정되지 않아 원본 데이터를 저장할 수 없습니다.");
-      }
 
       console.info("[persistence] Cloud-first save started", {
         screens: snapshot.appState.screens.length,
