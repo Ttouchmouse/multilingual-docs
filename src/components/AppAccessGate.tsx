@@ -93,6 +93,10 @@ export function AppAccessGate({ children }: { children: ReactNode }) {
     return <>{children}</>;
   }
 
+  if (accessStatus.phase === "checking") {
+    return <main className="access-gate-shell access-gate-shell-checking" aria-label="앱 접근 상태 확인" />;
+  }
+
   const locked = accessStatus.phase === "locked";
   const errorMessage = locked ? accessStatus.error : undefined;
 
@@ -103,7 +107,7 @@ export function AppAccessGate({ children }: { children: ReactNode }) {
         <input
           type="text"
           value={accessCode}
-          placeholder={accessStatus.phase === "checking" ? "확인 중입니다" : "보안 키 입력(영문+숫자 8자리)"}
+          placeholder="보안 키 입력(영문+숫자 8자리)"
           aria-label="보안 키"
           autoComplete="off"
           autoCapitalize="characters"
