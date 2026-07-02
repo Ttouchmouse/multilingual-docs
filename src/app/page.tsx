@@ -1,5 +1,10 @@
+import { AppAccessGate } from "@/components/AppAccessGate";
 import { MultilingualTextMap } from "@/components/MultilingualTextMap";
 
 export default function Home() {
-  return <MultilingualTextMap />;
+  return (
+    <AppAccessGate>
+      <MultilingualTextMap />
+    </AppAccessGate>
+  );
 }
