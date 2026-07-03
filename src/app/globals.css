@@ -1563,13 +1563,14 @@ label {
 
 .region-box {
   position: absolute;
-  border: 1px solid #ffffff;
+  border: 1px solid #3182f6;
   border-radius: 4px;
-  background: rgba(255, 255, 255, 0.2);
-  color: #ffffff;
+  background: rgba(49, 130, 246, 0.16);
+  color: #1b64da;
   padding: 0;
   overflow: hidden;
   text-align: left;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.72);
 }
 
 .region-box.readonly {
@@ -1582,9 +1583,9 @@ label {
 }
 
 .region-box.linked {
-  border-color: #ffffff;
-  background: rgba(255, 255, 255, 0.2);
-  color: #ffffff;
+  border-color: #3182f6;
+  background: rgba(49, 130, 246, 0.16);
+  color: #1b64da;
 }
 
 .region-box.selected {
