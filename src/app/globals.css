@@ -1536,7 +1536,7 @@ label {
   display: block;
   border: 0;
   border-radius: 0;
-  background: #fff;
+  background: transparent;
 }
 
 .image-letterbox {
