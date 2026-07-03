@@ -4,6 +4,12 @@ import { type FormEvent, type ReactNode, useEffect, useState } from "react";
 
 const ACCESS_SESSION_KEY = "tg-access-code-version";
 const ACCESS_LOCAL_KEY = "tg-access-code-version";
+const ACCESS_LOCAL_TTL_MS = 1000 * 60 * 60 * 24 * 7;
+
+type StoredAccessRecord = {
+  version: string;
+  expiresAt: number;
+};
 
 type AccessStatus =
   | { phase: "checking" }
@@ -16,6 +22,34 @@ type AccessStatusResponse = {
   ok?: boolean;
   authorized?: boolean;
 };
+
+function readStoredAccessVersion() {
+  const rawValue = window.localStorage.getItem(ACCESS_LOCAL_KEY);
+  if (!rawValue) return undefined;
+
+  try {
+    const parsed = JSON.parse(rawValue) as Partial<StoredAccessRecord>;
+    if (typeof parsed.version !== "string" || typeof parsed.expiresAt !== "number") return undefined;
+    if (Date.now() > parsed.expiresAt) {
+      window.localStorage.removeItem(ACCESS_LOCAL_KEY);
+      return undefined;
+    }
+    return parsed.version;
+  } catch {
+    return rawValue;
+  }
+}
+
+function rememberAccessVersion(version: string) {
+  window.sessionStorage.setItem(ACCESS_SESSION_KEY, version);
+  window.localStorage.setItem(
+    ACCESS_LOCAL_KEY,
+    JSON.stringify({
+      version,
+      expiresAt: Date.now() + ACCESS_LOCAL_TTL_MS,
+    } satisfies StoredAccessRecord),
+  );
+}
 
 export function AppAccessGate({ children }: { children: ReactNode }) {
   const [accessStatus, setAccessStatus] = useState<AccessStatus>({ phase: "checking" });
@@ -37,11 +71,10 @@ export function AppAccessGate({ children }: { children: ReactNode }) {
         }
 
         const version = payload.version ?? "";
-        const storedPersistentVersion = window.localStorage.getItem(ACCESS_LOCAL_KEY);
+        const storedPersistentVersion = readStoredAccessVersion();
         const storedVersion = window.sessionStorage.getItem(ACCESS_SESSION_KEY);
         if (payload.authorized && (storedPersistentVersion === version || storedVersion === version)) {
-          window.localStorage.setItem(ACCESS_LOCAL_KEY, version);
-          window.sessionStorage.setItem(ACCESS_SESSION_KEY, version);
+          rememberAccessVersion(version);
           if (!cancelled) setAccessStatus({ phase: "unlocked" });
           return;
         }
@@ -78,8 +111,7 @@ export function AppAccessGate({ children }: { children: ReactNode }) {
         throw new Error("보안 키를 확인해주세요.");
       }
 
-      window.sessionStorage.setItem(ACCESS_SESSION_KEY, payload.version);
-      window.localStorage.setItem(ACCESS_LOCAL_KEY, payload.version);
+      rememberAccessVersion(payload.version);
       setAccessStatus({ phase: "unlocked" });
     } catch (error) {
       const message = error instanceof Error ? error.message : "보안 키를 확인해주세요.";

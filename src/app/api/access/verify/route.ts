@@ -11,7 +11,17 @@ import {
 
 export const dynamic = "force-dynamic";
 
-const ACCESS_COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 30;
+const ACCESS_COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 7;
+
+function setAccessCookie(response: NextResponse, configuredCode: string) {
+  response.cookies.set(ACCESS_COOKIE_NAME, getAccessSessionToken(configuredCode), {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: process.env.NODE_ENV === "production",
+    path: "/",
+    maxAge: ACCESS_COOKIE_MAX_AGE_SECONDS,
+  });
+}
 
 export async function GET() {
   const configuredCode = getConfiguredAccessCode();
@@ -20,12 +30,19 @@ export async function GET() {
   }
 
   const cookieStore = await cookies();
+  const authorized = accessCookieMatches(cookieStore.get(ACCESS_COOKIE_NAME)?.value, configuredCode);
 
-  return NextResponse.json({
+  const response = NextResponse.json({
     enabled: true,
     version: getAccessVersion(configuredCode),
-    authorized: accessCookieMatches(cookieStore.get(ACCESS_COOKIE_NAME)?.value, configuredCode),
+    authorized,
   });
+
+  if (authorized) {
+    setAccessCookie(response, configuredCode);
+  }
+
+  return response;
 }
 
 export async function POST(request: Request) {
@@ -47,13 +64,7 @@ export async function POST(request: Request) {
   );
 
   if (ok) {
-    response.cookies.set(ACCESS_COOKIE_NAME, getAccessSessionToken(configuredCode), {
-      httpOnly: true,
-      sameSite: "lax",
-      secure: process.env.NODE_ENV === "production",
-      path: "/",
-      maxAge: ACCESS_COOKIE_MAX_AGE_SECONDS,
-    });
+    setAccessCookie(response, configuredCode);
   }
 
   return response;
