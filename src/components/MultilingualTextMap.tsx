@@ -678,7 +678,7 @@ export function MultilingualTextMap() {
   const [ocrByRegion, setOcrByRegion] = useState<Record<string, RegionOcrState>>({});
   const [persistenceStatus, setPersistenceStatus] = useState<PersistenceStatus>({
     phase: "loading",
-    message: "Supabase 데이터를 불러오는 중입니다.",
+    message: "데이터 불러오는 중",
   });
   const [persistenceRetryVersion, setPersistenceRetryVersion] = useState(0);
 
@@ -1109,24 +1109,17 @@ export function MultilingualTextMap() {
         if (data.supabaseStatus === "success") {
           setPersistenceStatus({
             phase: "ready",
-            message: "Supabase 원본 데이터를 불러왔습니다.",
+            message: "데이터 로드 완료",
           });
         } else if (data.source === "indexeddb") {
           setPersistenceStatus({
-            phase: "warning",
-            message:
-              data.supabaseStatus === "failed"
-                ? "Supabase 로드에 실패해 IndexedDB 캐시를 표시하고 있습니다. 최신 데이터를 불러온 뒤 다시 확인해주세요."
-                : "Supabase 원본이 없어 IndexedDB 캐시를 표시하고 있습니다. 원본 저장은 차단됩니다.",
-            recovery: "reload",
+            phase: "ready",
+            message: "로컬 캐시 표시 중",
           });
         } else {
           setPersistenceStatus({
             phase: data.supabaseStatus === "failed" ? "error" : "ready",
-            message:
-              data.supabaseStatus === "failed"
-                ? "Supabase와 IndexedDB에서 데이터를 불러오지 못했습니다."
-                : "저장된 데이터가 없습니다.",
+            message: data.supabaseStatus === "failed" ? "데이터 로드 실패" : "저장된 데이터 없음",
             recovery: data.supabaseStatus === "failed" ? "reload" : undefined,
           });
         }
@@ -1139,7 +1132,7 @@ export function MultilingualTextMap() {
         console.error("[persistence] Persisted data load failed. Showing empty state only after all stores failed.", error);
         setPersistenceStatus({
           phase: "error",
-          message: "저장 데이터를 불러오지 못했습니다. 네트워크와 Supabase 설정을 확인해주세요.",
+          message: "데이터 로드 실패",
           recovery: "reload",
         });
         setIsLoaded(true);
@@ -1209,18 +1202,16 @@ export function MultilingualTextMap() {
     if (supabaseLoadStatusRef.current === "failed") {
       console.error("[persistence] Cloud-first save blocked because the Supabase source failed to load.");
       setPersistenceStatus({
-        phase: "warning",
-        message: "Supabase 원본을 불러오지 못해 변경사항 저장이 차단되었습니다. 최신 데이터를 불러온 뒤 다시 시도해주세요.",
-        recovery: "reload",
+        phase: "ready",
+        message: "저장 차단됨",
       });
       return;
     }
     if (persistedDataSourceRef.current === "indexeddb" && supabaseLoadStatusRef.current !== "success") {
       console.error("[persistence] Cloud-first save blocked because the app is showing IndexedDB fallback data.");
       setPersistenceStatus({
-        phase: "warning",
-        message: "로컬 캐시 데이터를 표시 중이라 Supabase 원본 저장이 차단되었습니다. 최신 데이터를 불러온 뒤 다시 확인해주세요.",
-        recovery: "reload",
+        phase: "ready",
+        message: "로컬 캐시 표시 중",
       });
       return;
     }
@@ -1231,7 +1222,7 @@ export function MultilingualTextMap() {
     if (showSaveFeedback) {
       setPersistenceStatus({
         phase: "saving",
-        message: "Supabase에 변경사항을 저장하는 중입니다.",
+        message: "데이터 저장 중",
       });
     }
 
@@ -1245,8 +1236,8 @@ export function MultilingualTextMap() {
           supabaseLoadStatusRef.current = "success";
           if (showSaveFeedback) {
             setPersistenceStatus({
-              phase: "saved",
-              message: "Supabase 저장이 완료되었습니다.",
+              phase: "ready",
+              message: "데이터 저장 완료",
             });
           }
         })
@@ -1257,7 +1248,7 @@ export function MultilingualTextMap() {
           if (error instanceof Error && error.name === "SupabaseSnapshotConflictError") {
             setPersistenceStatus({
               phase: "error",
-              message,
+              message: "최신 데이터 필요",
               recovery: "reload",
             });
             return;
@@ -1265,7 +1256,7 @@ export function MultilingualTextMap() {
 
           setPersistenceStatus({
             phase: "error",
-            message: `Supabase 저장에 실패했습니다. 변경사항이 저장되지 않았습니다. ${message}`,
+            message: "데이터 저장 실패",
             recovery: "save",
           });
         });
@@ -1987,7 +1978,7 @@ export function MultilingualTextMap() {
         console.error("[persistence] Supabase image upload failed. Screen save was cancelled.", error);
         setPersistenceStatus({
           phase: "error",
-          message: `화면 이미지 업로드에 실패해 저장을 중단했습니다. ${message}`,
+          message: "이미지 업로드 실패",
         });
         return;
       }
@@ -2047,7 +2038,7 @@ export function MultilingualTextMap() {
         console.error("[persistence] Supabase image upload failed. Screen update was cancelled.", error);
         setPersistenceStatus({
           phase: "error",
-          message: `화면 이미지 업로드에 실패해 수정을 중단했습니다. ${message}`,
+          message: "이미지 업로드 실패",
         });
         return;
       }
@@ -3640,6 +3631,15 @@ export function MultilingualTextMap() {
         <div className="supabase-loading-status" role="status" aria-live="polite">
           <SupabaseLoadingLogo />
           <span>데이터 불러오는 중</span>
+        </div>
+      );
+    }
+
+    if (placement === "header" && persistenceStatus.phase === "saving") {
+      return (
+        <div className="supabase-loading-status" role="status" aria-live="polite">
+          <SupabaseLoadingLogo />
+          <span>데이터 저장 중</span>
         </div>
       );
     }
