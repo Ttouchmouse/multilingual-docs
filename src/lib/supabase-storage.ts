@@ -33,6 +33,7 @@ type SnapshotApiResponse = {
 
 type ImageUploadApiResponse = {
   result?: {
+    signedUrl?: string;
     imageUrl: string;
     imageStoragePath: string;
   };
@@ -59,6 +60,22 @@ function throwSnapshotError(response: Response, payload: SnapshotApiResponse): n
   }
 
   throw new Error(message);
+}
+
+async function uploadFileToSignedUrl(signedUrl: string, file: File) {
+  const formData = new FormData();
+  formData.append("cacheControl", "3600");
+  formData.append("", file);
+
+  const response = await fetch(signedUrl, {
+    method: "PUT",
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const payload = await readJson<{ error?: string; message?: string }>(response);
+    throw new Error(payload.error || payload.message || "화면 이미지 업로드에 실패했습니다.");
+  }
 }
 
 export async function loadSupabaseSnapshot() {
@@ -112,7 +129,37 @@ export async function saveSupabaseSnapshot(
   return { updatedAt: payload.updatedAt };
 }
 
-export async function uploadScreenImage(screenId: string, dataUrl: string) {
+export async function uploadScreenImage(screenId: string, dataUrl: string, file?: File) {
+  if (file) {
+    const response = await fetch("/api/screen-images", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify({
+        screenId,
+        fileName: file.name,
+        contentType: file.type,
+        uploadMode: "signed",
+      }),
+    });
+    const payload = await readJson<ImageUploadApiResponse>(response);
+
+    if (!response.ok || !payload.result?.signedUrl) {
+      const message = payload.error || "화면 이미지 업로드 URL을 만들 수 없습니다.";
+      if (response.status === 401) {
+        throw new SupabaseSnapshotUnauthorizedError(message);
+      }
+      throw new Error(message);
+    }
+
+    await uploadFileToSignedUrl(payload.result.signedUrl, file);
+
+    return {
+      imageUrl: payload.result.imageUrl,
+      imageStoragePath: payload.result.imageStoragePath,
+    };
+  }
+
   if (!dataUrl.startsWith("data:")) {
     return undefined;
   }

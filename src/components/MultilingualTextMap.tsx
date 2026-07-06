@@ -73,6 +73,7 @@ type ScreenForm = {
 
 type ImageDraft = {
   imageUrl: string;
+  file?: File;
   imageWidth: number;
   imageHeight: number;
   imageContentWidth: number;
@@ -1730,6 +1731,7 @@ export function MultilingualTextMap() {
 
     setImageDraft({
       imageUrl,
+      file,
       imageWidth: nextCoordinateWidth,
       imageHeight: nextCoordinateHeight,
       imageContentWidth: size.width,
@@ -1972,7 +1974,7 @@ export function MultilingualTextMap() {
       let uploadedImage: Awaited<ReturnType<typeof uploadScreenImage>> | undefined;
 
       try {
-        uploadedImage = await uploadScreenImage(screenId, imageDraft.imageUrl);
+        uploadedImage = await uploadScreenImage(screenId, imageDraft.imageUrl, imageDraft.file);
       } catch (error) {
         const message = error instanceof Error ? error.message : "알 수 없는 이미지 업로드 오류";
         console.error("[persistence] Supabase image upload failed. Screen save was cancelled.", error);
@@ -2032,7 +2034,7 @@ export function MultilingualTextMap() {
     let uploadedImage: Awaited<ReturnType<typeof uploadScreenImage>> | undefined;
     if (imageDraft) {
       try {
-        uploadedImage = await uploadScreenImage(currentScreen.id, imageDraft.imageUrl);
+        uploadedImage = await uploadScreenImage(currentScreen.id, imageDraft.imageUrl, imageDraft.file);
       } catch (error) {
         const message = error instanceof Error ? error.message : "알 수 없는 이미지 업로드 오류";
         console.error("[persistence] Supabase image upload failed. Screen update was cancelled.", error);

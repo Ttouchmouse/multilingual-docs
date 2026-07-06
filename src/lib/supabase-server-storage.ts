@@ -90,12 +90,18 @@ function getBackupId(timestamp: string) {
   return `${getSnapshotId()}_${timestamp}_${randomUUID()}`;
 }
 
+function getImageExtensionFromMimeOrName(mime = "", fileName = "") {
+  const normalizedMime = mime.toLowerCase();
+  const normalizedName = fileName.toLowerCase();
+  if (normalizedMime.includes("png") || normalizedName.endsWith(".png")) return "png";
+  if (normalizedMime.includes("webp") || normalizedName.endsWith(".webp")) return "webp";
+  if (normalizedMime.includes("gif") || normalizedName.endsWith(".gif")) return "gif";
+  return "jpg";
+}
+
 function getImageExtension(dataUrl: string) {
   const mime = dataUrl.match(/data:(.*?);base64/)?.[1] || "";
-  if (mime.includes("png")) return "png";
-  if (mime.includes("webp")) return "webp";
-  if (mime.includes("gif")) return "gif";
-  return "jpg";
+  return getImageExtensionFromMimeOrName(mime);
 }
 
 function dataUrlToFile(dataUrl: string) {
@@ -376,6 +382,34 @@ export async function saveServerSupabaseSnapshot(
   });
 
   return { updatedAt: data?.updated_at ?? nextUpdatedAt };
+}
+
+export async function createServerScreenImageUpload(screenId: string, fileName = "", contentType = "") {
+  const supabase = createServerSupabaseClient();
+  if (!supabase) {
+    throw new Error("Supabase가 설정되지 않아 이미지를 업로드할 수 없습니다.");
+  }
+
+  const extension = getImageExtensionFromMimeOrName(contentType, fileName);
+  const snapshotId = getSnapshotId();
+  const pathPrefix = snapshotId === "default" ? "" : `snapshots/${snapshotId}/`;
+  const path = `${pathPrefix}screens/${screenId}/${getStorageSafeTimestamp()}.${extension}`;
+
+  const { data: signedUpload, error } = await supabase.storage
+    .from(getBucketName())
+    .createSignedUploadUrl(path, { upsert: false });
+
+  if (error) {
+    throw error;
+  }
+
+  const { data: publicUrl } = supabase.storage.from(getBucketName()).getPublicUrl(path);
+
+  return {
+    signedUrl: signedUpload.signedUrl,
+    imageUrl: publicUrl.publicUrl,
+    imageStoragePath: path,
+  };
 }
 
 export async function uploadServerScreenImage(screenId: string, dataUrl: string) {
