@@ -19,12 +19,16 @@ npm run dev
 NEXT_PUBLIC_SUPABASE_URL=
 NEXT_PUBLIC_SUPABASE_ANON_KEY=
 NEXT_PUBLIC_SUPABASE_STORAGE_BUCKET=screen-images
+SUPABASE_URL=
+SUPABASE_SERVICE_ROLE_KEY=
 ```
 
 - Production, Preview, Development에 같은 Supabase 프로젝트 값을 설정하면 모든 환경이 `app_snapshots/default`를 원본으로 사용합니다.
 - `NEXT_PUBLIC_SUPABASE_ANON_KEY`는 브라우저에 공개되는 anon key이며 `service_role` key를 넣으면 안 됩니다.
+- `SUPABASE_SERVICE_ROLE_KEY`는 서버 API에서만 사용합니다. 브라우저 공개 환경변수인 `NEXT_PUBLIC_*` 이름으로 넣으면 안 됩니다.
 - `.env.local`은 Git에 커밋되지 않습니다. 필요한 변수 이름은 `.env.example`에서 확인합니다.
 - 최초 1회 Supabase SQL Editor에서 `supabase-setup.sql`을 실행해야 테이블, RLS 정책, Storage bucket이 준비됩니다.
+- 서버 API 경로가 정상 동작하고 `SUPABASE_SERVICE_ROLE_KEY`가 설정된 뒤에는 `supabase-rls-lockdown.sql`을 실행해 anon 직접 DB 쓰기/읽기와 Storage 직접 업로드를 막을 수 있습니다.
 
 ## 데이터 저장 정책
 
