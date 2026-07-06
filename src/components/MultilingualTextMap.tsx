@@ -1243,10 +1243,10 @@ export function MultilingualTextMap() {
       const expectedUpdatedAt = supabaseSnapshotUpdatedAtRef.current;
       savePersistedData(appState, translations, expectedUpdatedAt)
         .then((saveResult) => {
-          if (persistenceRevisionRef.current !== revision) return;
           supabaseSnapshotUpdatedAtRef.current = saveResult.updatedAt ?? supabaseSnapshotUpdatedAtRef.current;
           persistedDataSourceRef.current = "supabase";
           supabaseLoadStatusRef.current = "success";
+          if (persistenceRevisionRef.current !== revision) return;
           if (showSaveFeedback) {
             setPersistenceStatus({
               phase: "ready",
@@ -3158,11 +3158,17 @@ export function MultilingualTextMap() {
   }
 
   function getMatchedLanguagePreview(item: TranslationItem, matchType: string) {
-    const language = LANGUAGE_DEFS.find(
-      ({ code, label }) => code !== "kr" && code !== "en" && matchType.startsWith(`${label} `),
-    );
-    if (!language || !item[language.code]) return "";
-    return `${language.label}: ${item[language.code]} · `;
+    if (matchType.startsWith("key ")) {
+      return { label: "key", value: item.key };
+    }
+
+    const language = LANGUAGE_DEFS.find(({ label }) => matchType.startsWith(`${label} `));
+    if (!language) return undefined;
+
+    return {
+      label: language.label,
+      value: item[language.code],
+    };
   }
 
   function renderKeyDialog() {
@@ -3223,6 +3229,10 @@ export function MultilingualTextMap() {
             const source = sourceById.get(item.sourceId);
             const duplicate = isDuplicateCandidate(item, searchableTranslations);
             const linkedCount = linkedTranslationUsage.get(item.id) ?? 0;
+            const matchedPreview = getMatchedLanguagePreview(item, matchType);
+            const shouldShowMatchedPreview =
+              matchedPreview && matchedPreview.value && matchedPreview.label !== "KR";
+            const shouldShowEnglish = item.en && matchedPreview?.label !== "EN";
 
             return (
               <button
@@ -3233,18 +3243,28 @@ export function MultilingualTextMap() {
               >
                 <div className="key-result-title">
                   <span>{item.key}</span>
-                  {linkedCount > 0 ? (
-                    <small className="key-linked-badge" title={`${linkedCount}개 텍스트 영역에 연결됨`}>
-                      <i aria-hidden="true" />
-                      연결됨
-                    </small>
-                  ) : null}
+                  <div className="key-result-tags">
+                    {linkedCount > 0 ? (
+                      <small className="key-linked-badge" title={`${linkedCount}개 텍스트 영역에 연결됨`}>
+                        <i aria-hidden="true" />
+                        연결됨
+                      </small>
+                    ) : null}
+                    {duplicate ? <small className="key-duplicate-badge">중복</small> : null}
+                  </div>
                 </div>
-                <strong>{item.kr || "KR 없음"}</strong>
+                <strong>KR: {item.kr || "없음"}</strong>
+                <div className="key-result-values">
+                  {shouldShowMatchedPreview ? (
+                    <span>
+                      {matchedPreview.label}: {matchedPreview.value}
+                    </span>
+                  ) : null}
+                  {shouldShowEnglish ? <span>EN: {item.en}</span> : null}
+                </div>
                 <em>
-                  {getMatchedLanguagePreview(item, matchType)}
-                  {item.en || "EN 없음"} · {source?.fileName ?? "알 수 없는 소스"} · {matchType}
-                  {duplicate ? " · 중복 후보" : ""}
+                  {source?.fileName ?? "알 수 없는 소스"} · {matchType}
+                  {linkedCount > 0 ? ` · ${linkedCount}개 영역에서 사용` : ""}
                 </em>
               </button>
             );
