@@ -671,6 +671,7 @@ export function MultilingualTextMap() {
   const [regionDeleteTargetId, setRegionDeleteTargetId] = useState<string>();
   const [addLeaveConfirmOpen, setAddLeaveConfirmOpen] = useState(false);
   const [sourceDialogOpen, setSourceDialogOpen] = useState(false);
+  const [saveConflictOpen, setSaveConflictOpen] = useState(false);
   const [globalSearchQuery, setGlobalSearchQuery] = useState("");
   const [globalSearchOpen, setGlobalSearchOpen] = useState(false);
   const [pendingGlobalFocusRegionId, setPendingGlobalFocusRegionId] = useState<string>();
@@ -696,6 +697,7 @@ export function MultilingualTextMap() {
   const supabaseLoadStatusRef = useRef<SupabaseLoadStatus>("unconfigured");
   const supabaseSnapshotUpdatedAtRef = useRef<string | undefined>(undefined);
   const persistenceRevisionRef = useRef(0);
+  const saveBlockedByConflictRef = useRef(false);
   const showNextSaveFeedbackRef = useRef(false);
   const suppressedRegionClickRef = useRef<string | undefined>(undefined);
   const regionHistoryRef = useRef<RegionHistory>({ scope: "", undo: [], redo: [] });
@@ -1093,6 +1095,7 @@ export function MultilingualTextMap() {
         persistedDataSourceRef.current = data.source;
         supabaseLoadStatusRef.current = data.supabaseStatus;
         supabaseSnapshotUpdatedAtRef.current = data.supabaseUpdatedAt;
+        saveBlockedByConflictRef.current = false;
         skipNextSupabaseSaveRef.current = true;
         console.info("[persistence] Applying loaded data to View Mode", {
           source: data.source,
@@ -1216,6 +1219,15 @@ export function MultilingualTextMap() {
       });
       return;
     }
+    if (saveBlockedByConflictRef.current) {
+      console.warn("[persistence] Cloud-first save skipped because the local revision is stale.");
+      setPersistenceStatus({
+        phase: "error",
+        message: "최신 데이터 필요",
+        recovery: "reload",
+      });
+      return;
+    }
     const revision = ++persistenceRevisionRef.current;
     const showSaveFeedback = showNextSaveFeedbackRef.current;
     showNextSaveFeedbackRef.current = false;
@@ -1247,6 +1259,8 @@ export function MultilingualTextMap() {
           const message = error instanceof Error ? error.message : "알 수 없는 저장 오류";
           console.error("[persistence] Cloud-first save failed. IndexedDB cache was not updated.", error);
           if (error instanceof Error && error.name === "SupabaseSnapshotConflictError") {
+            saveBlockedByConflictRef.current = true;
+            setSaveConflictOpen(true);
             setPersistenceStatus({
               phase: "error",
               message: "최신 데이터 필요",
@@ -3708,6 +3722,36 @@ export function MultilingualTextMap() {
     );
   }
 
+  function renderSaveConflictDialog() {
+    if (!saveConflictOpen) return null;
+
+    return (
+      <div className="confirm-modal-backdrop" role="presentation" onClick={() => setSaveConflictOpen(false)}>
+        <section
+          className="confirm-modal save-conflict-modal"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="save-conflict-title"
+          onClick={(event) => event.stopPropagation()}
+        >
+          <h2 id="save-conflict-title">최신 데이터가 먼저 저장되었습니다.</h2>
+          <p>
+            현재 브라우저가 이전 데이터를 기준으로 열려 있어 저장을 중단했습니다. 기존 작업을 덮어쓰지 않으려면
+            최신 데이터를 불러온 뒤 다시 작업해주세요.
+          </p>
+          <div className="confirm-actions">
+            <button type="button" className="confirm-cancel" onClick={() => setSaveConflictOpen(false)}>
+              현재 화면 유지
+            </button>
+            <button type="button" className="confirm-primary" onClick={() => window.location.reload()}>
+              최신 데이터 불러오기
+            </button>
+          </div>
+        </section>
+      </div>
+    );
+  }
+
   function renderRegionDeleteConfirmDialog() {
     if (!regionDeleteTargetId || !isEditing) return null;
 
@@ -4249,6 +4293,7 @@ export function MultilingualTextMap() {
       {renderTranslationSourceDialog()}
       {renderUpdateCandidateDialog()}
       {renderDeleteConfirmDialog()}
+      {renderSaveConflictDialog()}
       {renderRegionDeleteConfirmDialog()}
       {renderAddLeaveConfirmDialog()}
     </main>

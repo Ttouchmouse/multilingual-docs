@@ -2868,7 +2868,8 @@ label {
 }
 
 .confirm-cancel,
-.confirm-delete {
+.confirm-delete,
+.confirm-primary {
   min-width: 80px;
   min-height: 48px;
   border: 0;
@@ -2887,4 +2888,13 @@ label {
 .confirm-delete {
   background: #ef2b2a;
   color: #fff;
+}
+
+.confirm-primary {
+  background: #3182f6;
+  color: #fff;
+}
+
+.save-conflict-modal {
+  width: min(420px, calc(100vw - 32px));
 }
