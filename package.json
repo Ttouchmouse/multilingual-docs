@@ -12,7 +12,7 @@
     "@supabase/supabase-js": "^2.106.2",
     "next": "^16.0.0",
     "react": "^19.2.0",
-    "react-dom": "^19.2.0",
+    "react-dom": "^19.2.7",
     "tesseract.js": "^7.0.0",
     "xlsx": "^0.18.5"
   },
