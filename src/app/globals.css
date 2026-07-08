@@ -2585,16 +2585,17 @@ label {
 
 .key-result-row {
   width: 335px;
-  min-height: 104px;
+  min-height: 112px;
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  justify-content: center;
-  gap: 4px;
+  justify-content: flex-start;
+  gap: 2px;
   border: 0;
   border-bottom: 1px solid #e5e8eb;
   background: #fff;
-  padding: 12px 0;
+  box-sizing: border-box;
+  padding: 12px 0 12px;
   text-align: left;
 }
 
@@ -2602,13 +2603,18 @@ label {
   background: #f2f8ff;
 }
 
-.key-result-row strong,
 .key-result-row em,
 .key-result-values span {
-  width: 100%;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.key-result-row strong,
+.key-result-row em {
+  width: 100%;
+  max-width: 100%;
 }
 
 .key-result-row .key-result-title,
@@ -2623,8 +2629,13 @@ label {
 }
 
 .key-result-row strong {
+  display: flex;
+  align-items: center;
   font-size: 15px;
-  line-height: 20px;
+  min-height: 22px;
+  line-height: 22px;
+  overflow: visible;
+  padding: 0;
 }
 
 .key-result-row .key-result-title > span {
@@ -2639,6 +2650,15 @@ label {
   font-weight: 700;
 }
 
+.key-result-kr span {
+  min-width: 0;
+  width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 22px;
+}
+
 .key-result-tags {
   display: inline-flex;
   flex: 0 0 auto;
@@ -2649,15 +2669,36 @@ label {
 
 .key-result-values {
   width: 100%;
-  display: grid;
-  gap: 1px;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  white-space: nowrap;
 }
 
 .key-result-values span {
+  width: auto;
+  min-width: 0;
+  max-width: 50%;
+  flex: 0 1 auto;
   color: #6b7684;
   font-size: 12px;
   font-weight: 600;
-  line-height: 16px;
+  line-height: 17px;
+}
+
+.key-result-values span + span {
+  display: inline-flex;
+  align-items: center;
+}
+
+.key-result-values span + span::before {
+  content: "";
+  width: 1px;
+  height: 10px;
+  flex: 0 0 1px;
+  margin: 0 8px;
+  background: #d0d6dd;
 }
 
 .key-result-row em {
@@ -2665,11 +2706,9 @@ label {
   font-size: 11px;
   font-style: normal;
   font-weight: 500;
-  line-height: 15px;
-  white-space: normal;
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
+  line-height: 17px;
+  white-space: nowrap;
+  display: block;
 }
 
 .dialog-actions {

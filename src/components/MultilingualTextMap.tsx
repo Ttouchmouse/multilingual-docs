@@ -3171,6 +3171,19 @@ export function MultilingualTextMap() {
     };
   }
 
+  function getDisplayTranslationKey(item: TranslationItem) {
+    const rowKeyMatch = item.key.match(/(?:^|_)row_(\d+)$/);
+    if (item.rawData?.internalKey === item.key && rowKeyMatch) {
+      return `자동 row_${rowKeyMatch[1]}`;
+    }
+
+    return item.key;
+  }
+
+  function getReadableMatchType(matchType: string) {
+    return matchType === "fuzzy match" ? "유사 일치" : matchType;
+  }
+
   function renderKeyDialog() {
     if (!keyDialogRegionId || !keyDialogAnchor) return null;
 
@@ -3182,7 +3195,19 @@ export function MultilingualTextMap() {
       : undefined;
     const pendingItem = pendingTranslationItemId ? translationsById.get(pendingTranslationItemId) : undefined;
     const ocrState = ocrByRegion[dialogRegion.id];
-    const candidateRows = searchQuery.trim() ? searchCandidates : [];
+    const candidateRows = searchQuery.trim()
+      ? [...searchCandidates].sort((left, right) => {
+          const leftIsFuzzy = left.matchType === "fuzzy match";
+          const rightIsFuzzy = right.matchType === "fuzzy match";
+          if (leftIsFuzzy !== rightIsFuzzy) return leftIsFuzzy ? 1 : -1;
+
+          const leftLinkedCount = linkedTranslationUsage.get(left.item.id) ?? 0;
+          const rightLinkedCount = linkedTranslationUsage.get(right.item.id) ?? 0;
+          if (leftLinkedCount !== rightLinkedCount) return rightLinkedCount - leftLinkedCount;
+
+          return right.score - left.score || left.item.key.localeCompare(right.item.key);
+        })
+      : [];
 
     return (
       <section
@@ -3233,6 +3258,8 @@ export function MultilingualTextMap() {
             const shouldShowMatchedPreview =
               matchedPreview && matchedPreview.value && matchedPreview.label !== "KR";
             const shouldShowEnglish = item.en && matchedPreview?.label !== "EN";
+            const displayKey = getDisplayTranslationKey(item);
+            const readableMatchType = getReadableMatchType(matchType);
 
             return (
               <button
@@ -3242,7 +3269,7 @@ export function MultilingualTextMap() {
                 onClick={() => setPendingTranslationItemId(item.id)}
               >
                 <div className="key-result-title">
-                  <span>{item.key}</span>
+                  <span title={item.key}>{displayKey}</span>
                   <div className="key-result-tags">
                     {linkedCount > 0 ? (
                       <small className="key-linked-badge" title={`${linkedCount}개 텍스트 영역에 연결됨`}>
@@ -3253,7 +3280,9 @@ export function MultilingualTextMap() {
                     {duplicate ? <small className="key-duplicate-badge">중복</small> : null}
                   </div>
                 </div>
-                <strong>KR: {item.kr || "없음"}</strong>
+                <strong className="key-result-kr">
+                  <span>KR: {item.kr || "없음"}</span>
+                </strong>
                 <div className="key-result-values">
                   {shouldShowMatchedPreview ? (
                     <span>
@@ -3263,7 +3292,7 @@ export function MultilingualTextMap() {
                   {shouldShowEnglish ? <span>EN: {item.en}</span> : null}
                 </div>
                 <em>
-                  {source?.fileName ?? "알 수 없는 소스"} · {matchType}
+                  {source?.fileName ?? "알 수 없는 소스"} · {readableMatchType}
                   {linkedCount > 0 ? ` · ${linkedCount}개 영역에서 사용` : ""}
                 </em>
               </button>
