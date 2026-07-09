@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import {
   LANGUAGE_DEFS,
   SCREEN_GROUPS,
@@ -60,6 +60,12 @@ type RegionHistory = {
   scope: string;
   undo: TextRegion[][];
   redo: TextRegion[][];
+};
+
+type RowContextMenu = {
+  regionId: string;
+  x: number;
+  y: number;
 };
 
 type ScreenForm = {
@@ -677,6 +683,8 @@ export function MultilingualTextMap() {
   const [globalSearchOpen, setGlobalSearchOpen] = useState(false);
   const [pendingGlobalFocusRegionId, setPendingGlobalFocusRegionId] = useState<string>();
   const [copyFeedback, setCopyFeedback] = useState<{ id: number; message: string }>();
+  const [copiedRowValues, setCopiedRowValues] = useState<string[] | null>(null);
+  const [rowContextMenu, setRowContextMenu] = useState<RowContextMenu | null>(null);
   const [updateCandidateRegionId, setUpdateCandidateRegionId] = useState<string>();
   const [ocrByRegion, setOcrByRegion] = useState<Record<string, RegionOcrState>>({});
   const [persistenceStatus, setPersistenceStatus] = useState<PersistenceStatus>({
@@ -1312,6 +1320,24 @@ export function MultilingualTextMap() {
     const timeout = window.setTimeout(() => setCopyFeedback(undefined), 1600);
     return () => window.clearTimeout(timeout);
   }, [copyFeedback]);
+
+  useEffect(() => {
+    if (!rowContextMenu) return;
+
+    const closeMenu = () => setRowContextMenu(null);
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") closeMenu();
+    };
+
+    window.addEventListener("pointerdown", closeMenu);
+    window.addEventListener("scroll", closeMenu, true);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", closeMenu);
+      window.removeEventListener("scroll", closeMenu, true);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [rowContextMenu]);
 
   useEffect(() => {
     if (!isLoaded || translationSources.length > 0 || translations.length > 0 || defaultDataLoadAttempted.current) return;
@@ -2381,6 +2407,30 @@ export function MultilingualTextMap() {
     setEditingCell(null);
   }
 
+  async function writeClipboardText(text: string) {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const textarea = document.createElement("textarea");
+      textarea.value = text;
+      textarea.setAttribute("readonly", "");
+      textarea.style.position = "fixed";
+      textarea.style.left = "-9999px";
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand("copy");
+      document.body.removeChild(textarea);
+    }
+  }
+
+  async function readClipboardText() {
+    if (!navigator.clipboard?.readText) {
+      throw new Error("클립보드 읽기를 지원하지 않는 브라우저입니다.");
+    }
+
+    return navigator.clipboard.readText();
+  }
+
   async function copyTextCellValue(value: string, label: string) {
     const text = value.trim();
     if (!text) {
@@ -2389,25 +2439,115 @@ export function MultilingualTextMap() {
     }
 
     try {
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(text);
-      } else {
-        const textarea = document.createElement("textarea");
-        textarea.value = text;
-        textarea.setAttribute("readonly", "");
-        textarea.style.position = "fixed";
-        textarea.style.left = "-9999px";
-        document.body.appendChild(textarea);
-        textarea.select();
-        document.execCommand("copy");
-        document.body.removeChild(textarea);
-      }
+      await writeClipboardText(text);
 
       setCopyFeedback({ id: Date.now(), message: `${label} 텍스트를 복사했습니다.` });
     } catch (error) {
       console.error("[clipboard] Failed to copy translation cell value.", error);
       setCopyFeedback({ id: Date.now(), message: "복사에 실패했습니다." });
     }
+  }
+
+  async function copyTranslationRow(region: TextRegion) {
+    const item = region.translationItemId ? translationsById.get(region.translationItemId) : undefined;
+    const values = [
+      ...LANGUAGE_DEFS.map((language) => getCellValue(region, item, language.code).displayValue),
+      region.memo,
+    ];
+    const text = values.map((value) => value.replace(/\r?\n/g, "\n")).join("\t");
+
+    if (!text.trim()) {
+      setCopyFeedback({ id: Date.now(), message: "복사할 Row 값이 없습니다." });
+      return;
+    }
+
+    try {
+      await writeClipboardText(text);
+      setCopiedRowValues(values);
+      setCopyFeedback({ id: Date.now(), message: "Row 전체를 복사했습니다." });
+    } catch (error) {
+      console.error("[clipboard] Failed to copy translation row.", error);
+      setCopyFeedback({ id: Date.now(), message: "복사에 실패했습니다." });
+    }
+  }
+
+  function parseTranslationRowClipboardText(text: string) {
+    const normalizedText = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+    const firstLine = normalizedText.split("\n")[0] ?? "";
+    return firstLine.split("\t");
+  }
+
+  async function pasteTranslationRow(region: TextRegion) {
+    if (!isEditing) {
+      setCopyFeedback({ id: Date.now(), message: "화면 추가/편집 모드에서만 붙여넣을 수 있습니다." });
+      return;
+    }
+
+    try {
+      const text = copiedRowValues ? "" : await readClipboardText();
+      const values = copiedRowValues ?? parseTranslationRowClipboardText(text);
+      const expectedColumnCount = LANGUAGE_DEFS.length + 1;
+
+      if (values.length < LANGUAGE_DEFS.length || values.length > expectedColumnCount) {
+        setCopyFeedback({ id: Date.now(), message: "붙여넣을 Row 형식이 올바르지 않습니다." });
+        return;
+      }
+
+      const item = region.translationItemId ? translationsById.get(region.translationItemId) : undefined;
+      const nextOverrides = { ...(region.translationOverrides ?? {}) };
+      const nextHistory = { ...(region.translationOverrideHistory ?? {}) };
+      let changed = false;
+
+      for (const [index, language] of LANGUAGE_DEFS.entries()) {
+        const nextValue = values[index] ?? "";
+        const baseValue = item?.[language.code] ?? "";
+        const currentValue = getCellValue(region, item, language.code).displayValue;
+        if (nextValue === currentValue) continue;
+
+        if (nextValue === baseValue) {
+          delete nextOverrides[language.code];
+        } else {
+          nextOverrides[language.code] = nextValue;
+        }
+        delete nextHistory[language.code];
+        changed = true;
+      }
+
+      const nextMemo = values[LANGUAGE_DEFS.length] ?? region.memo;
+      const memoChanged = nextMemo !== region.memo;
+      if (!changed && !memoChanged) {
+        setCopyFeedback({ id: Date.now(), message: "변경할 Row 값이 없습니다." });
+        return;
+      }
+
+      updateRegion(region.id, {
+        translationOverrides: Object.keys(nextOverrides).length > 0 ? nextOverrides : undefined,
+        translationOverrideHistory: Object.keys(nextHistory).length > 0 ? nextHistory : undefined,
+        memo: nextMemo,
+      });
+      setSelectedRegionId(region.id);
+      setEditingCell(null);
+      setCopyFeedback({ id: Date.now(), message: "Row 값을 붙여넣었습니다." });
+    } catch (error) {
+      console.error("[clipboard] Failed to paste translation row.", error);
+      setCopyFeedback({ id: Date.now(), message: "붙여넣기에 실패했습니다." });
+    }
+  }
+
+  function isNativeContextTarget(target: EventTarget | null) {
+    return target instanceof Element && Boolean(target.closest("button, input, textarea, select, a"));
+  }
+
+  function openRowContextMenu(event: MouseEvent, region: TextRegion) {
+    if (isNativeContextTarget(event.target)) return;
+
+    event.preventDefault();
+    setSelectedRegionId(region.id);
+    setRowContextMenu({
+      regionId: region.id,
+      x: Math.min(event.clientX, window.innerWidth - 180),
+      y: Math.min(event.clientY, window.innerHeight - 72),
+    });
   }
 
   function getCellValue(region: TextRegion, item: TranslationItem | undefined, languageCode: LanguageCode) {
@@ -2976,6 +3116,7 @@ export function MultilingualTextMap() {
                       draggedRegionId === region.id ? "dragging" : ""
                     } ${dragOverRegionId === region.id ? "drop-target" : ""}`}
                     onClick={() => selectRegionFromTable(region)}
+                    onContextMenu={(event) => openRowContextMenu(event, region)}
                     onDragOver={(event) => {
                       if (!canReorderRows || !draggedRegionId || draggedRegionId === region.id) return;
                       event.preventDefault();
@@ -3029,9 +3170,8 @@ export function MultilingualTextMap() {
                         const updateCandidates = item ? (updateCandidatesByItemId.get(item.id) ?? []) : [];
                         const isCellEditing =
                           editingCell?.regionId === region.id && editingCell.languageCode === language.code;
-                        const editHistory =
-                          region.translationOverrideHistory?.[language.code] ??
-                          (baseValue ? [baseValue] : ["기존 문구 없음"]);
+                        const editHistory = region.translationOverrideHistory?.[language.code] ?? [];
+                        const hasModifiedHistory = hasOverride && editHistory.length > 0;
 
                         return (
                           <td
@@ -3088,7 +3228,7 @@ export function MultilingualTextMap() {
                                     업데이트 후보 있음
                                   </button>
                                 ) : null}
-                                {hasOverride ? (
+                                {hasModifiedHistory ? (
                                   <span
                                     className="translation-modified-tag"
                                     aria-label={`${language.label} 이전 기록: ${editHistory.join(", ")}`}
@@ -3153,6 +3293,46 @@ export function MultilingualTextMap() {
         ) : null}
         {filteredRegions.length === 0 ? (
           <div className="empty-list">이 조건에 맞는 텍스트 영역이 없습니다.</div>
+        ) : null}
+      </div>
+    );
+  }
+
+  function renderRowContextMenu() {
+    if (!rowContextMenu) return null;
+
+    const region = activeRegions.find((candidate) => candidate.id === rowContextMenu.regionId);
+    if (!region) return null;
+
+    return (
+      <div
+        className="row-context-menu"
+        style={{ left: rowContextMenu.x, top: rowContextMenu.y }}
+        role="menu"
+        onPointerDown={(event) => event.stopPropagation()}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <button
+          type="button"
+          role="menuitem"
+          onClick={() => {
+            setRowContextMenu(null);
+            void copyTranslationRow(region);
+          }}
+        >
+          Row 복사
+        </button>
+        {isEditing ? (
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              setRowContextMenu(null);
+              void pasteTranslationRow(region);
+            }}
+          >
+            Row 붙여넣기
+          </button>
         ) : null}
       </div>
     );
@@ -4069,6 +4249,7 @@ export function MultilingualTextMap() {
           {copyFeedback.message}
         </div>
       ) : null}
+      {renderRowContextMenu()}
 
       {!isLoaded ? (
         <section className="persistence-loading-view" aria-label="저장 데이터 로드 중">

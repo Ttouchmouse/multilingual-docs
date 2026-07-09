@@ -515,6 +515,39 @@ label {
   pointer-events: none;
 }
 
+.row-context-menu {
+  position: fixed;
+  z-index: 170;
+  min-width: 148px;
+  border: 1px solid #e5e8eb;
+  border-radius: 12px;
+  background: #fff;
+  padding: 6px;
+  box-shadow: 0 10px 28px rgba(0, 27, 55, 0.16);
+}
+
+.row-context-menu button {
+  width: 100%;
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #333d48;
+  padding: 0 10px;
+  font-size: 14px;
+  font-weight: 590;
+  line-height: 20px;
+  text-align: left;
+}
+
+.row-context-menu button:hover,
+.row-context-menu button:focus-visible {
+  background: #f2f4f6;
+  outline: none;
+}
+
 .persistence-status-indicator {
   width: 8px;
   height: 8px;
