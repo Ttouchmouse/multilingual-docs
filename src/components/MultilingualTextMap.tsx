@@ -671,6 +671,7 @@ export function MultilingualTextMap() {
   const [regionDeleteTargetId, setRegionDeleteTargetId] = useState<string>();
   const [addLeaveConfirmOpen, setAddLeaveConfirmOpen] = useState(false);
   const [sourceDialogOpen, setSourceDialogOpen] = useState(false);
+  const [disabledSourcesOpen, setDisabledSourcesOpen] = useState(false);
   const [saveConflictOpen, setSaveConflictOpen] = useState(false);
   const [globalSearchQuery, setGlobalSearchQuery] = useState("");
   const [globalSearchOpen, setGlobalSearchOpen] = useState(false);
@@ -3509,6 +3510,57 @@ export function MultilingualTextMap() {
   function renderTranslationSourceDialog() {
     if (!sourceDialogOpen) return null;
 
+    const enabledSources = translationSources.filter((source) => source.enabled !== false);
+    const disabledSources = translationSources.filter((source) => source.enabled === false);
+    const renderSourceRow = (source: TranslationSource, index: number) => {
+      const sourceId = getSourceId(source);
+      const linkedCount = linkedSourceUsage.get(sourceId) ?? 0;
+      const duplicateCount = sourceDuplicateCountById.get(sourceId) ?? 0;
+      const sourceMeta = [
+        `${getSourceItemCount(source).toLocaleString()}개`,
+        linkedCount > 0 ? `연결 ${linkedCount.toLocaleString()}개` : "연결 없음",
+        getSourceImportedAt(source).slice(0, 10),
+        duplicateCount > 1 ? `동일 ID ${duplicateCount}개` : "",
+      ].filter(Boolean);
+
+      return (
+        <div className={`source-row ${source.enabled === false ? "disabled" : ""}`} key={`${sourceId}:${index}`}>
+          <button
+            type="button"
+            className="source-main"
+            onClick={() => toggleTranslationSource(sourceId)}
+            title={source.enabled === false ? "비활성화됨" : "활성화됨"}
+          >
+            <span className="source-chip">{source.fileType}</span>
+            <span className="source-name">{formatSourceName(source.fileName)}</span>
+            <span className="source-meta-small">
+              {sourceMeta.join(" · ")}
+            </span>
+          </button>
+          <button
+            type="button"
+            className="source-delete"
+            onClick={() => deleteTranslationSource(sourceId)}
+            aria-label={`${source.fileName} 삭제`}
+          >
+            <svg
+              width="24"
+              height="24"
+              viewBox="0 0 24 24"
+              fill="none"
+              xmlns="http://www.w3.org/2000/svg"
+              aria-hidden="true"
+            >
+              <path
+                d="M7 21C6.45 21 5.97933 20.8043 5.588 20.413C5.19667 20.0217 5.00067 19.5507 5 19V6H4V4H9V3H15V4H20V6H19V19C19 19.55 18.8043 20.021 18.413 20.413C18.0217 20.805 17.5507 21.0007 17 21H7ZM9 17H11V8H9V17ZM13 17H15V8H13V17Z"
+                fill="#D5DAE1"
+              />
+            </svg>
+          </button>
+        </div>
+      );
+    };
+
     return (
       <div className="source-modal-backdrop" role="presentation" onClick={() => setSourceDialogOpen(false)}>
         <section
@@ -3539,54 +3591,28 @@ export function MultilingualTextMap() {
           />
 
           <div className="source-list">
-            {translationSources.map((source, index) => {
-              const sourceId = getSourceId(source);
-              const linkedCount = linkedSourceUsage.get(sourceId) ?? 0;
-              const duplicateCount = sourceDuplicateCountById.get(sourceId) ?? 0;
-              const sourceMeta = [
-                `${getSourceItemCount(source).toLocaleString()}개`,
-                linkedCount > 0 ? `연결 ${linkedCount.toLocaleString()}개` : "연결 없음",
-                getSourceImportedAt(source).slice(0, 10),
-                duplicateCount > 1 ? `동일 ID ${duplicateCount}개` : "",
-              ].filter(Boolean);
-
-              return (
-                <div className={`source-row ${source.enabled === false ? "disabled" : ""}`} key={`${sourceId}:${index}`}>
-                  <button
-                    type="button"
-                    className="source-main"
-                    onClick={() => toggleTranslationSource(sourceId)}
-                    title={source.enabled === false ? "비활성화됨" : "활성화됨"}
-                  >
-                    <span className="source-chip">{source.fileType}</span>
-                    <span className="source-name">{formatSourceName(source.fileName)}</span>
-                    <span className="source-meta-small">
-                      {sourceMeta.join(" · ")}
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    className="source-delete"
-                    onClick={() => deleteTranslationSource(sourceId)}
-                    aria-label={`${source.fileName} 삭제`}
-                  >
-                    <svg
-                      width="24"
-                      height="24"
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      xmlns="http://www.w3.org/2000/svg"
-                      aria-hidden="true"
-                    >
-                      <path
-                        d="M7 21C6.45 21 5.97933 20.8043 5.588 20.413C5.19667 20.0217 5.00067 19.5507 5 19V6H4V4H9V3H15V4H20V6H19V19C19 19.55 18.8043 20.021 18.413 20.413C18.0217 20.805 17.5507 21.0007 17 21H7ZM9 17H11V8H9V17ZM13 17H15V8H13V17Z"
-                        fill="#D5DAE1"
-                      />
-                    </svg>
-                  </button>
-                </div>
-              );
-            })}
+            {enabledSources.map(renderSourceRow)}
+            {disabledSources.length > 0 ? (
+              <div className="source-disabled-section">
+                <button
+                  type="button"
+                  className="source-disabled-toggle"
+                  onClick={() => setDisabledSourcesOpen((isOpen) => !isOpen)}
+                  aria-expanded={disabledSourcesOpen}
+                >
+                  <span className="source-disabled-chevron">
+                    <SelectChevronIcon />
+                  </span>
+                  <span>비활성화한 파일</span>
+                  <em>{disabledSources.length.toLocaleString()}개</em>
+                </button>
+                {disabledSourcesOpen ? (
+                  <div className="source-disabled-list">
+                    {disabledSources.map((source, index) => renderSourceRow(source, index))}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
             {translationSources.length === 0 ? (
               <div className="source-empty">등록된 번역 데이터가 없습니다.</div>
             ) : null}
