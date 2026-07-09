@@ -31,6 +31,14 @@ type SnapshotApiResponse = {
   code?: string;
 };
 
+type SnapshotUploadApiResponse = {
+  result?: {
+    signedUrl: string;
+    path: string;
+  };
+  error?: string;
+};
+
 type ImageUploadApiResponse = {
   result?: {
     signedUrl?: string;
@@ -109,16 +117,40 @@ export async function loadSupabaseSnapshot() {
   };
 }
 
+async function uploadTranslationsSnapshot(translations: TranslationItem[]) {
+  const uploadResponse = await fetch("/api/snapshot", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "same-origin",
+    body: JSON.stringify({ uploadKind: "translations" }),
+  });
+  const uploadPayload = await readJson<SnapshotUploadApiResponse>(uploadResponse);
+
+  if (!uploadResponse.ok || !uploadPayload.result?.signedUrl) {
+    throwSnapshotError(uploadResponse, uploadPayload);
+  }
+
+  const file = new File(
+    [JSON.stringify(translations)],
+    `translations-${Date.now()}.json`,
+    { type: "application/json" },
+  );
+  await uploadFileToSignedUrl(uploadPayload.result.signedUrl, file);
+
+  return uploadPayload.result.path;
+}
+
 export async function saveSupabaseSnapshot(
   appState: AppState,
   translations: TranslationItem[] | undefined,
   expectedUpdatedAt?: string,
 ) {
+  const translationsUploadPath = translations ? await uploadTranslationsSnapshot(translations) : undefined;
   const response = await fetch("/api/snapshot", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     credentials: "same-origin",
-    body: JSON.stringify({ appState, translations, expectedUpdatedAt }),
+    body: JSON.stringify({ appState, translationsUploadPath, expectedUpdatedAt }),
   });
   const payload = await readJson<SnapshotApiResponse>(response);
 

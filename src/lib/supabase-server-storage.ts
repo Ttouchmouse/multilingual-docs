@@ -44,6 +44,21 @@ function getBucketName() {
   return process.env.NEXT_PUBLIC_SUPABASE_STORAGE_BUCKET || "screen-images";
 }
 
+function getSnapshotStoragePathPrefix() {
+  const snapshotId = getSnapshotId();
+  return snapshotId === "default" ? "" : `snapshots/${snapshotId}/`;
+}
+
+function getSnapshotTranslationsUploadPrefix() {
+  return `${getSnapshotStoragePathPrefix()}snapshot-uploads/${getSnapshotId()}/translations-`;
+}
+
+function assertSnapshotTranslationsUploadPath(path: string) {
+  if (!path.startsWith(getSnapshotTranslationsUploadPrefix()) || !path.endsWith(".json")) {
+    throw new Error("업로드된 번역 데이터 경로가 올바르지 않습니다.");
+  }
+}
+
 function createServerSupabaseClient() {
   const supabaseUrl = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
   const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SECRET_KEY;
@@ -380,6 +395,62 @@ export async function saveServerSupabaseSnapshot(
   return { updatedAt: data?.updated_at ?? nextUpdatedAt };
 }
 
+export async function createServerSnapshotTranslationsUpload() {
+  const supabase = createServerSupabaseClient();
+  if (!supabase) {
+    throw new Error("Supabase가 설정되지 않아 번역 데이터를 업로드할 수 없습니다.");
+  }
+
+  const path = `${getSnapshotTranslationsUploadPrefix()}${getStorageSafeTimestamp()}-${randomUUID()}.json`;
+
+  const { data: signedUpload, error } = await supabase.storage
+    .from(getBucketName())
+    .createSignedUploadUrl(path, { upsert: false });
+
+  if (error) {
+    throw error;
+  }
+
+  return {
+    signedUrl: signedUpload.signedUrl,
+    path,
+  };
+}
+
+export async function loadServerSnapshotTranslationsUpload(path: string) {
+  assertSnapshotTranslationsUploadPath(path);
+
+  const supabase = createServerSupabaseClient();
+  if (!supabase) {
+    throw new Error("Supabase가 설정되지 않아 번역 데이터를 읽을 수 없습니다.");
+  }
+
+  const { data, error } = await supabase.storage.from(getBucketName()).download(path);
+  if (error) {
+    throw error;
+  }
+
+  const text = await data.text();
+  const parsed = JSON.parse(text) as unknown;
+  if (!Array.isArray(parsed)) {
+    throw new Error("업로드된 번역 데이터 형식이 올바르지 않습니다.");
+  }
+
+  return parsed as TranslationItem[];
+}
+
+export async function deleteServerSnapshotUpload(path: string) {
+  assertSnapshotTranslationsUploadPath(path);
+
+  const supabase = createServerSupabaseClient();
+  if (!supabase) return;
+
+  const { error } = await supabase.storage.from(getBucketName()).remove([path]);
+  if (error) {
+    console.warn("[persistence] Snapshot temporary upload cleanup failed.", getSupabaseErrorDetails(error));
+  }
+}
+
 export async function createServerScreenImageUpload(screenId: string, fileName = "", contentType = "") {
   const supabase = createServerSupabaseClient();
   if (!supabase) {
@@ -387,9 +458,7 @@ export async function createServerScreenImageUpload(screenId: string, fileName =
   }
 
   const extension = getImageExtensionFromMimeOrName(contentType, fileName);
-  const snapshotId = getSnapshotId();
-  const pathPrefix = snapshotId === "default" ? "" : `snapshots/${snapshotId}/`;
-  const path = `${pathPrefix}screens/${screenId}/${getStorageSafeTimestamp()}.${extension}`;
+  const path = `${getSnapshotStoragePathPrefix()}screens/${screenId}/${getStorageSafeTimestamp()}.${extension}`;
 
   const { data: signedUpload, error } = await supabase.storage
     .from(getBucketName())
@@ -419,9 +488,7 @@ export async function uploadServerScreenImage(screenId: string, dataUrl: string)
   }
 
   const extension = getImageExtension(dataUrl);
-  const snapshotId = getSnapshotId();
-  const pathPrefix = snapshotId === "default" ? "" : `snapshots/${snapshotId}/`;
-  const path = `${pathPrefix}screens/${screenId}/${getStorageSafeTimestamp()}.${extension}`;
+  const path = `${getSnapshotStoragePathPrefix()}screens/${screenId}/${getStorageSafeTimestamp()}.${extension}`;
   const file = dataUrlToFile(dataUrl);
   const { error } = await supabase.storage.from(getBucketName()).upload(path, file.buffer, {
     cacheControl: "3600",

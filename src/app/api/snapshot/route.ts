@@ -2,6 +2,9 @@ import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { isApiRequestAuthorized, unauthorizedJson } from "@/lib/api-auth";
 import {
+  createServerSnapshotTranslationsUpload,
+  deleteServerSnapshotUpload,
+  loadServerSnapshotTranslationsUpload,
   loadServerSupabaseSnapshot,
   saveServerSupabaseSnapshot,
 } from "@/lib/supabase-server-storage";
@@ -12,7 +15,12 @@ export const dynamic = "force-dynamic";
 type SaveSnapshotBody = {
   appState?: AppState;
   translations?: TranslationItem[];
+  translationsUploadPath?: string;
   expectedUpdatedAt?: string;
+};
+
+type CreateSnapshotUploadBody = {
+  uploadKind?: "translations";
 };
 
 export async function GET(request: NextRequest) {
@@ -53,15 +61,26 @@ export async function PUT(request: NextRequest) {
     return unauthorizedJson();
   }
 
+  let translationsUploadPath: string | undefined;
+
   try {
     const body = (await request.json()) as SaveSnapshotBody;
-    if (!body.appState || (body.translations !== undefined && !Array.isArray(body.translations))) {
+    translationsUploadPath = body.translationsUploadPath;
+    if (
+      !body.appState ||
+      (body.translations !== undefined && !Array.isArray(body.translations)) ||
+      (body.translations !== undefined && body.translationsUploadPath)
+    ) {
       return NextResponse.json({ error: "저장할 스냅샷 데이터가 올바르지 않습니다." }, { status: 400 });
     }
 
+    const translations = translationsUploadPath
+      ? await loadServerSnapshotTranslationsUpload(translationsUploadPath)
+      : body.translations;
+
     const result = await saveServerSupabaseSnapshot(
       body.appState,
-      body.translations,
+      translations,
       body.expectedUpdatedAt,
     );
 
@@ -73,6 +92,30 @@ export async function PUT(request: NextRequest) {
       return NextResponse.json({ error: message, code: "SNAPSHOT_CONFLICT" }, { status: 409 });
     }
 
+    return NextResponse.json({ error: message }, { status: 500 });
+  } finally {
+    if (translationsUploadPath) {
+      await deleteServerSnapshotUpload(translationsUploadPath);
+    }
+  }
+}
+
+export async function POST(request: NextRequest) {
+  if (!isApiRequestAuthorized(request)) {
+    return unauthorizedJson();
+  }
+
+  try {
+    const body = (await request.json()) as CreateSnapshotUploadBody;
+    if (body.uploadKind !== "translations") {
+      return NextResponse.json({ error: "업로드할 스냅샷 데이터가 올바르지 않습니다." }, { status: 400 });
+    }
+
+    const result = await createServerSnapshotTranslationsUpload();
+    return NextResponse.json({ result });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "스냅샷 업로드 URL을 만들 수 없습니다.";
+    console.error("[persistence] Server snapshot upload creation failed.", error);
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }
