@@ -620,9 +620,15 @@ function saveStoredOpenGroups(openGroups: Record<string, boolean>) {
 
 function BackArrowIcon() {
   return (
-    <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-      <path d="M7 3L2 8L7 13" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M2 8H14" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path
+        d="M19 12H5M11 6L5 12L11 18"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
     </svg>
   );
 }
