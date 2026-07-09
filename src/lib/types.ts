@@ -3,12 +3,12 @@ export const LANGUAGE_DEFS = [
   { code: "en", label: "EN", sourceHeader: "English", name: "영어" },
   { code: "sc", label: "SC", sourceHeader: "Chinese", name: "중국어 간체" },
   { code: "tc", label: "TC", sourceHeader: "Taiwan", name: "중국어 번체" },
-  { code: "es", label: "ES", sourceHeader: "Spanish", name: "스페인어" },
+  { code: "es", label: "ESP", sourceHeader: "Spanish", name: "스페인어" },
   { code: "it", label: "IT", sourceHeader: "Italian", name: "이탈리아어" },
-  { code: "pt", label: "PT", sourceHeader: "Portuguese", name: "포르투갈어" },
+  { code: "pt", label: "POR", sourceHeader: "Portuguese", name: "포르투갈어" },
   { code: "de", label: "DE", sourceHeader: "German", name: "독일어" },
   { code: "fr", label: "FR", sourceHeader: "French", name: "프랑스어" },
-  { code: "jp", label: "JP", sourceHeader: "Japanese", name: "일본어" },
+  { code: "jp", label: "JA", sourceHeader: "Japanese", name: "일본어" },
   { code: "th", label: "TH", sourceHeader: "Thai", name: "태국어" },
 ] as const;
 
