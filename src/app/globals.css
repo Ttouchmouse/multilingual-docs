@@ -994,10 +994,10 @@ label {
 
 .add-save-button {
   grid-column: 4;
-  align-self: end;
+  align-self: start;
   width: 80px;
   height: 54px;
-  margin-top: 0;
+  margin-top: 24px;
   border: 0;
   border-radius: 14px;
   background: #3182f6;
