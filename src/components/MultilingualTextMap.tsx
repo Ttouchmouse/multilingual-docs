@@ -722,6 +722,7 @@ export function MultilingualTextMap() {
   const allowAddHistoryPopRef = useRef(false);
   const openGroupsLoadedRef = useRef(false);
   const skipNextOpenGroupsSaveRef = useRef(true);
+  const immediateSelectedRegionIdRef = useRef<string | undefined>(undefined);
 
   const translationSources = appState.sources ?? (appState.source ? [appState.source] : []);
   const enabledSourceIds = useMemo(
@@ -974,6 +975,7 @@ export function MultilingualTextMap() {
     if (document.activeElement instanceof HTMLElement) {
       document.activeElement.blur();
     }
+    applyImmediateRegionSelection(region.id);
     setSelectedRegionId(region.id);
     setKeyDialogRegionId(region.id);
     setKeyDialogAnchor(anchor);
@@ -1350,6 +1352,15 @@ export function MultilingualTextMap() {
     defaultDataLoadAttempted.current = true;
     void loadLocalHtml();
   }, [isLoaded, translationSources.length, translations.length]);
+
+  useEffect(() => {
+    if (!selectedRegionId) {
+      immediateSelectedRegionIdRef.current = undefined;
+      return;
+    }
+
+    window.requestAnimationFrame(() => applyImmediateRegionSelection(selectedRegionId));
+  }, [selectedRegionId]);
 
   useEffect(() => {
     if (!globalSearchOpen) return;
@@ -2543,6 +2554,7 @@ export function MultilingualTextMap() {
     if (isNativeContextTarget(event.target)) return;
 
     event.preventDefault();
+    applyImmediateRegionSelection(region.id);
     setSelectedRegionId(region.id);
     setRowContextMenu({
       regionId: region.id,
@@ -2559,6 +2571,25 @@ export function MultilingualTextMap() {
       displayValue: hasOverride ? (region.translationOverrides?.[languageCode] ?? "") : (item?.[languageCode] ?? ""),
       hasOverride,
     };
+  }
+
+  function getRegionDomSelector(regionId: string) {
+    return `[data-region-id="${regionId.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"]`;
+  }
+
+  function setDomRegionSelected(regionId: string, selected: boolean) {
+    document.querySelectorAll(getRegionDomSelector(regionId)).forEach((element) => {
+      element.classList.toggle("selected", selected);
+    });
+  }
+
+  function applyImmediateRegionSelection(regionId: string) {
+    const previousRegionId = immediateSelectedRegionIdRef.current ?? selectedRegionId;
+    if (previousRegionId && previousRegionId !== regionId) {
+      setDomRegionSelected(previousRegionId, false);
+    }
+    setDomRegionSelected(regionId, true);
+    immediateSelectedRegionIdRef.current = regionId;
   }
 
   function scrollRegionIntoView(region: TextRegion, behavior: ScrollBehavior = "smooth") {
@@ -2606,11 +2637,13 @@ export function MultilingualTextMap() {
   }
 
   function selectRegionFromScreen(region: TextRegion) {
+    applyImmediateRegionSelection(region.id);
     setSelectedRegionId(region.id);
     window.requestAnimationFrame(() => scrollTableRowIntoView(region.id));
   }
 
   function selectRegionFromTable(region: TextRegion) {
+    applyImmediateRegionSelection(region.id);
     setSelectedRegionId(region.id);
     if (!isScreenRegion(region)) return;
 
@@ -2942,6 +2975,7 @@ export function MultilingualTextMap() {
               <button
                 type="button"
                 key={region.id}
+                data-region-id={region.id}
                 data-region-selection-scope="true"
                 className={`region-box ${selected ? "selected" : ""} ${linked ? "linked" : "unlinked"} ${
                   isEditing ? "editable" : "readonly"
@@ -3023,6 +3057,7 @@ export function MultilingualTextMap() {
               <button
                 type="button"
                 key={region.id}
+                data-region-id={region.id}
                 data-region-selection-scope="true"
                 className={`region-box ${selected ? "selected" : ""} ${linked ? "linked" : "unlinked"} editable`}
                 style={{
@@ -3111,6 +3146,7 @@ export function MultilingualTextMap() {
                 return (
                   <tr
                     key={region.id}
+                    data-region-id={region.id}
                     data-region-selection-scope="true"
                     ref={(element) => {
                       itemRefs.current[region.id] = element;
