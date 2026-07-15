@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
+import { startTransition, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import {
   LANGUAGE_DEFS,
   SCREEN_GROUPS,
@@ -926,6 +926,11 @@ export function MultilingualTextMap() {
   );
 
   const activeRegions = mode === "add" ? draftRegions : editDraftRegions ?? regionsForScreen;
+  const activeRegionIndexById = useMemo(() => {
+    const indexById = new Map<string, number>();
+    activeRegions.forEach((region, index) => indexById.set(region.id, index));
+    return indexById;
+  }, [activeRegions]);
   const selectedRegion = activeRegions.find((region) => region.id === selectedRegionId);
 
   const filteredRegions = useMemo(() => {
@@ -2618,7 +2623,7 @@ export function MultilingualTextMap() {
     });
   }
 
-  function scrollTableRowIntoView(regionId: string) {
+  function scrollTableRowIntoView(regionId: string, behavior: ScrollBehavior = "auto") {
     const scrollContainer = translationTableWrapRef.current;
     const row = itemRefs.current[regionId];
     if (!scrollContainer || !row) return;
@@ -2632,19 +2637,19 @@ export function MultilingualTextMap() {
 
     scrollContainer.scrollTo({
       top: clamp(targetTop, 0, maxScrollTop),
-      behavior: "smooth",
+      behavior,
     });
   }
 
   function selectRegionFromScreen(region: TextRegion) {
     applyImmediateRegionSelection(region.id);
-    setSelectedRegionId(region.id);
+    startTransition(() => setSelectedRegionId(region.id));
     window.requestAnimationFrame(() => scrollTableRowIntoView(region.id));
   }
 
   function selectRegionFromTable(region: TextRegion) {
     applyImmediateRegionSelection(region.id);
-    setSelectedRegionId(region.id);
+    startTransition(() => setSelectedRegionId(region.id));
     if (!isScreenRegion(region)) return;
 
     window.requestAnimationFrame(() => scrollRegionIntoView(region, "auto"));
@@ -3140,7 +3145,7 @@ export function MultilingualTextMap() {
               {filteredRegions.map((region, index) => {
                 const item = region.translationItemId ? translationsById.get(region.translationItemId) : undefined;
                 const selected = region.id === selectedRegionId;
-                const activeRegionIndex = activeRegions.findIndex((candidate) => candidate.id === region.id);
+                const activeRegionIndex = activeRegionIndexById.get(region.id) ?? -1;
                 const insertIndex = activeRegionIndex >= 0 ? activeRegionIndex : index;
 
                 return (
