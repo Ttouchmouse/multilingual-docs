@@ -1352,11 +1352,6 @@ export function MultilingualTextMap() {
   }, [isLoaded, translationSources.length, translations.length]);
 
   useEffect(() => {
-    if (!selectedRegionId) return;
-    window.requestAnimationFrame(() => scrollTableRowIntoView(selectedRegionId));
-  }, [selectedRegionId]);
-
-  useEffect(() => {
     if (!globalSearchOpen) return;
 
     const onPointerDown = (event: PointerEvent) => {
@@ -2566,7 +2561,7 @@ export function MultilingualTextMap() {
     };
   }
 
-  function scrollRegionIntoView(region: TextRegion) {
+  function scrollRegionIntoView(region: TextRegion, behavior: ScrollBehavior = "smooth") {
     if (!isScreenRegion(region)) return;
 
     const viewport = imageViewportRef.current;
@@ -2588,7 +2583,7 @@ export function MultilingualTextMap() {
 
     viewport.scrollTo({
       top: clamp(targetTop, 0, maxScrollTop),
-      behavior: "smooth",
+      behavior,
     });
   }
 
@@ -2619,7 +2614,7 @@ export function MultilingualTextMap() {
     setSelectedRegionId(region.id);
     if (!isScreenRegion(region)) return;
 
-    window.requestAnimationFrame(() => scrollRegionIntoView(region));
+    window.requestAnimationFrame(() => scrollRegionIntoView(region, "auto"));
   }
 
   function selectGlobalSearchMatch(match: GlobalSearchMatch) {
@@ -2967,6 +2962,7 @@ export function MultilingualTextMap() {
                   if (consumeSuppressedRegionClick(region.id)) return;
                   if (isEditing) {
                     openKeyDialog(region, { x: event.clientX + 12, y: event.clientY + 12 });
+                    window.requestAnimationFrame(() => scrollTableRowIntoView(region.id));
                     if (!region.visibleText && ocrByRegion[region.id]?.status !== "running") {
                       void runOcrForRegion(region);
                     }
@@ -3044,6 +3040,7 @@ export function MultilingualTextMap() {
                   event.stopPropagation();
                   if (consumeSuppressedRegionClick(region.id)) return;
                   openKeyDialog(region, { x: event.clientX + 12, y: event.clientY + 12 });
+                  window.requestAnimationFrame(() => scrollTableRowIntoView(region.id));
                   if (!region.visibleText && ocrByRegion[region.id]?.status !== "running") {
                     void runOcrForRegion(region);
                   }
