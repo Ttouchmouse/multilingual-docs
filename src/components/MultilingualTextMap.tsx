@@ -243,6 +243,15 @@ function isScreenRegion(region: TextRegion) {
   return region.width > 0 && region.height > 0;
 }
 
+function isEditableTextTarget(target: EventTarget | null) {
+  return (
+    target instanceof HTMLInputElement ||
+    target instanceof HTMLTextAreaElement ||
+    target instanceof HTMLSelectElement ||
+    (target instanceof HTMLElement && target.isContentEditable)
+  );
+}
+
 function getMovedRect(
   initial: ImageRect,
   startX: number,
@@ -1398,12 +1407,6 @@ export function MultilingualTextMap() {
     if (!isEditing || !selectedRegionId || keyDialogRegionId || regionDeleteTargetId) return;
 
     const onKeyDown = (event: KeyboardEvent) => {
-      const target = event.target;
-      const isEditingText =
-        target instanceof HTMLInputElement ||
-        target instanceof HTMLTextAreaElement ||
-        target instanceof HTMLSelectElement ||
-        (target instanceof HTMLElement && target.isContentEditable);
       const isDeleteKey =
         event.key === "Backspace" ||
         event.key === "Delete" ||
@@ -1411,7 +1414,7 @@ export function MultilingualTextMap() {
         event.code === "Delete" ||
         event.keyCode === 8 ||
         event.keyCode === 46;
-      if (!isDeleteKey || event.repeat || isEditingText) return;
+      if (!isDeleteKey || event.repeat || isEditableTextTarget(event.target)) return;
 
       event.preventDefault();
       event.stopPropagation();
@@ -1428,7 +1431,9 @@ export function MultilingualTextMap() {
     if (!isEditing) return;
 
     const onKeyDown = (event: KeyboardEvent) => {
-      if (!event.metaKey || event.key.toLowerCase() !== "z" || event.repeat) return;
+      const isUndoShortcut =
+        (event.metaKey || event.ctrlKey) && !event.altKey && event.key.toLowerCase() === "z";
+      if (!isUndoShortcut || event.repeat || isEditableTextTarget(event.target)) return;
 
       const history = getRegionHistory();
       const canApplyHistory = event.shiftKey ? history.redo.length > 0 : history.undo.length > 0;
@@ -2793,6 +2798,7 @@ export function MultilingualTextMap() {
       nextOverrides[editingCell.languageCode] = editingCellValue;
     }
 
+    recordRegionHistory(activeRegions);
     updateRegion(editingCell.regionId, {
       translationOverrides: Object.keys(nextOverrides).length > 0 ? nextOverrides : undefined,
       translationOverrideHistory: nextHistory,
