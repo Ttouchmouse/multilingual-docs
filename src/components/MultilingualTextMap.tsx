@@ -1810,7 +1810,7 @@ export function MultilingualTextMap() {
       fileName: file.name,
     });
     if (mode === "add") {
-      setDraftRegions([]);
+      setDraftRegions((regions) => regions.filter((region) => !isScreenRegion(region)));
       setEditDraftRegions(null);
     } else if (mode === "edit" && previousImage) {
       setEditDraftRegions(
@@ -3171,7 +3171,7 @@ export function MultilingualTextMap() {
           aria-label={`${insertIndex + 1}번째 위치에 Row 추가`}
           title="여기에 Row 추가"
         >
-          <span aria-hidden="true">+</span>
+          <span aria-hidden="true" />
         </button>
       );
     };
@@ -4286,31 +4286,39 @@ export function MultilingualTextMap() {
 
           <div className="add-main-content">
             <h2 className="add-results-title">연결 결과</h2>
-            {hasScreenImage ? (
-              hasRegions ? (
-                renderTranslationTable()
-              ) : (
-                <div className="add-empty-copy">
-                  <strong>연결한 텍스트가 없어요</strong>
-                  <span>
-                    화면을 업로드하고
-                    <br />
-                    텍스트 영역 지정 후
-                    <br />
-                    키를 연결하면 보여요.
-                  </span>
-                </div>
-              )
+            {hasRegions ? (
+              renderTranslationTable()
             ) : (
-              <div className="add-empty-copy">
-                <strong>연결한 텍스트가 없어요</strong>
-                <span>
-                  화면을 업로드하고
-                  <br />
-                  텍스트 영역 지정 후
-                  <br />
-                  키를 연결하면 보여요.
-                </span>
+              <div className="add-empty-guide">
+                <div className="add-empty-guide-content">
+                  <ol className="add-empty-steps">
+                    {[
+                      { icon: "/figma/step-1.svg", text: "화면을 업로드하고" },
+                      { icon: "/figma/step-2.svg", text: "텍스트 영역 지정 or Row 추가 후" },
+                      { icon: "/figma/step-3.svg", text: "Key 연결 or 직접 입력할 수 있어요." },
+                    ].map((step, index) => (
+                      <li key={step.icon}>
+                        <span className="add-empty-step-asset" aria-hidden="true">
+                          <span className="add-empty-step-number">
+                            {/* eslint-disable-next-line @next/next/no-img-element */}
+                            <img src={step.icon} alt="" />
+                          </span>
+                          {index < 2 ? <span className="add-empty-step-bar" /> : null}
+                        </span>
+                        <span className="add-empty-step-copy">{step.text}</span>
+                      </li>
+                    ))}
+                  </ol>
+                  <button
+                    type="button"
+                    className="add-empty-row-button"
+                    onClick={(event) =>
+                      insertTableOnlyRegion(0, { x: event.clientX + 12, y: event.clientY + 12 })
+                    }
+                  >
+                    Row 추가
+                  </button>
+                </div>
               </div>
             )}
           </div>

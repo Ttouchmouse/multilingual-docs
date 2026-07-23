@@ -1030,14 +1030,11 @@ label {
   letter-spacing: 0;
 }
 
-.add-empty-copy {
+.add-empty-guide {
   min-height: min(696px, calc(100vh - 312px));
   display: grid;
   place-content: center;
   justify-items: center;
-  gap: 10px;
-  color: #6b7684;
-  text-align: center;
 }
 
 .add-main-content .translation-table-wrap {
@@ -1055,18 +1052,108 @@ label {
   height: 64px;
 }
 
-.add-empty-copy strong {
-  color: #2e394a;
-  font-size: 20px;
-  font-weight: 700;
-  line-height: 28px;
+.add-empty-guide-content {
+  width: 375px;
+  height: 210px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  transform: translateX(26px);
 }
 
-.add-empty-copy span {
-  width: 141px;
-  font-size: 14px;
-  font-weight: 400;
-  line-height: 20px;
+.add-empty-steps {
+  width: 375px;
+  height: 150px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.add-empty-steps li {
+  width: 375px;
+  height: 50px;
+  display: flex;
+  align-items: stretch;
+  gap: 12px;
+  padding: 3px 24px;
+}
+
+.add-empty-step-asset {
+  width: 30px;
+  display: flex;
+  flex: 0 0 30px;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.add-empty-step-number {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  flex: 0 0 30px;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(7, 25, 76, 0.05);
+}
+
+.add-empty-step-number img {
+  display: block;
+}
+
+.add-empty-steps li:nth-child(1) .add-empty-step-number img {
+  width: 4.499px;
+  height: 9.523px;
+}
+
+.add-empty-steps li:nth-child(2) .add-empty-step-number img {
+  width: 6.832px;
+  height: 9.453px;
+}
+
+.add-empty-steps li:nth-child(3) .add-empty-step-number img {
+  width: 7.03px;
+  height: 9.658px;
+}
+
+.add-empty-step-bar {
+  width: 2px;
+  min-height: 1px;
+  flex: 1 1 auto;
+  border-radius: 41px;
+  background: #e5e8eb;
+}
+
+.add-empty-step-copy {
+  min-width: 0;
+  flex: 1 1 auto;
+  padding: 2px 0 16px;
+  color: rgba(0, 12, 30, 0.8);
+  font-family: "SF Pro", "Pretendard JP", Pretendard, system-ui, sans-serif;
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 25.5px;
+  overflow-wrap: break-word;
+}
+
+.add-empty-row-button {
+  width: 146px;
+  height: 48px;
+  min-width: 80px;
+  min-height: 48px;
+  border: 0;
+  border-radius: 14px;
+  background: #4e5968;
+  color: #fff;
+  padding: 2px 16px;
+  font-family: "SF Pro", "Pretendard JP", Pretendard, system-ui, sans-serif;
+  font-size: 17px;
+  font-weight: 590;
+  line-height: 21.284px;
+  text-align: center;
+  cursor: pointer;
 }
 
 .edit-panel {
@@ -1942,13 +2029,29 @@ label {
   place-items: center;
   border-radius: 999px;
   background: #3182f6;
-  color: #fff;
-  font-size: 21px;
-  font-weight: 700;
-  line-height: 28px;
   opacity: 0;
   transform: translateY(-50%);
-  box-shadow: 0 6px 14px rgba(49, 130, 246, 0.28);
+}
+
+.translation-row-insert-button > span::before,
+.translation-row-insert-button > span::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  border-radius: 1px;
+  background: #fff;
+  transform: translate(-50%, -50%);
+}
+
+.translation-row-insert-button > span::before {
+  width: 12px;
+  height: 3px;
+}
+
+.translation-row-insert-button > span::after {
+  width: 3px;
+  height: 12px;
 }
 
 .translation-row-insert-button:hover::before,
