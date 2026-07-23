@@ -536,6 +536,21 @@ function screenToForm(screen: Screen): ScreenForm {
   };
 }
 
+function screenFormsEqual(left: ScreenForm, right: ScreenForm) {
+  return (
+    left.name === right.name &&
+    left.group === right.group &&
+    left.platform === right.platform &&
+    left.baseLanguage === right.baseLanguage &&
+    left.figmaUrl === right.figmaUrl &&
+    left.memo === right.memo
+  );
+}
+
+function regionsEqual(left: TextRegion[], right: TextRegion[]) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
 function getScreenGroup(screen: Screen) {
   return screen.group?.trim() || "기타";
 }
@@ -690,7 +705,7 @@ export function MultilingualTextMap() {
   const [editingGroup, setEditingGroup] = useState<EditingGroup | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
   const [regionDeleteTargetId, setRegionDeleteTargetId] = useState<string>();
-  const [addLeaveConfirmOpen, setAddLeaveConfirmOpen] = useState(false);
+  const [leaveConfirmOpen, setLeaveConfirmOpen] = useState(false);
   const [sourceDialogOpen, setSourceDialogOpen] = useState(false);
   const [disabledSourcesOpen, setDisabledSourcesOpen] = useState(false);
   const [saveConflictOpen, setSaveConflictOpen] = useState(false);
@@ -728,8 +743,10 @@ export function MultilingualTextMap() {
   const interactionHistoryRecordedRef = useRef(false);
   const duplicateMoveAxisRef = useRef<MoveAxis | undefined>(undefined);
   const rowKeyDialogTimerRef = useRef<number | undefined>(undefined);
-  const addHistoryEntryActiveRef = useRef(false);
-  const allowAddHistoryPopRef = useRef(false);
+  const editorHistoryEntryActiveRef = useRef(false);
+  const allowEditorHistoryPopRef = useRef(false);
+  const initialScreenFormRef = useRef<ScreenForm>(defaultScreenForm);
+  const initialEditRegionsRef = useRef<TextRegion[]>([]);
   const openGroupsLoadedRef = useRef(false);
   const skipNextOpenGroupsSaveRef = useRef(true);
   const immediateSelectedRegionIdRef = useRef<string | undefined>(undefined);
@@ -785,15 +802,17 @@ export function MultilingualTextMap() {
     );
   }, [appState.groups, appState.screens, screenForm.group]);
   const isEditing = mode === "add" || mode === "edit";
-  const isAddModeDirty =
-    mode === "add" &&
-    Boolean(
-      imageDraft ||
-        draftRegions.length > 0 ||
-        screenForm.name.trim() ||
-        screenForm.memo.trim() ||
-        screenForm.figmaUrl.trim(),
-    );
+  const hasScreenFormChanges = !screenFormsEqual(screenForm, initialScreenFormRef.current);
+  const isEditorDirty =
+    mode === "add"
+      ? Boolean(imageDraft || draftRegions.length > 0 || hasScreenFormChanges)
+      : mode === "edit"
+        ? Boolean(
+            imageDraft ||
+              hasScreenFormChanges ||
+              (editDraftRegions && !regionsEqual(editDraftRegions, initialEditRegionsRef.current)),
+          )
+        : false;
   const editableImage = useMemo<ImageTarget | undefined>(() => {
     if (mode === "add" && imageDraft) {
       return {
@@ -907,20 +926,27 @@ export function MultilingualTextMap() {
 
     return candidatesByItemId;
   }, [enabledSourceIds, sourceById, translations]);
+  const regionsForUsage = useMemo(() => {
+    if (mode === "add") return [...appState.regions, ...draftRegions];
+    if (mode === "edit" && currentScreen && editDraftRegions) {
+      return replaceScreenRegions(appState.regions, currentScreen.id, editDraftRegions);
+    }
+    return appState.regions;
+  }, [appState.regions, currentScreen, draftRegions, editDraftRegions, mode]);
   const linkedTranslationUsage = useMemo(() => {
     const usage = new Map<string, number>();
 
-    for (const region of [...appState.regions, ...draftRegions]) {
+    for (const region of regionsForUsage) {
       if (!region.translationItemId) continue;
       usage.set(region.translationItemId, (usage.get(region.translationItemId) ?? 0) + 1);
     }
 
     return usage;
-  }, [appState.regions, draftRegions]);
+  }, [regionsForUsage]);
   const linkedSourceUsage = useMemo(() => {
     const usage = new Map<string, number>();
 
-    for (const region of [...appState.regions, ...draftRegions]) {
+    for (const region of regionsForUsage) {
       if (!region.translationItemId) continue;
       const item = translationsById.get(region.translationItemId);
       if (!item) continue;
@@ -928,7 +954,7 @@ export function MultilingualTextMap() {
     }
 
     return usage;
-  }, [appState.regions, draftRegions, translationsById]);
+  }, [regionsForUsage, translationsById]);
 
   const regionsForScreen = useMemo(
     () => appState.regions.filter((region) => region.screenId === selectedScreenId),
@@ -1086,38 +1112,33 @@ export function MultilingualTextMap() {
     closeKeyDialog();
   }
 
-  function pushAddHistoryEntry() {
-    if (addHistoryEntryActiveRef.current) return;
+  function pushEditorHistoryEntry() {
+    if (editorHistoryEntryActiveRef.current) return;
     const currentState =
       typeof window.history.state === "object" && window.history.state !== null ? window.history.state : {};
-    window.history.pushState({ ...currentState, tgAddMode: true }, "", window.location.href);
-    addHistoryEntryActiveRef.current = true;
+    window.history.pushState({ ...currentState, tgEditorMode: true }, "", window.location.href);
+    editorHistoryEntryActiveRef.current = true;
   }
 
-  function consumeAddHistoryEntry() {
-    if (!addHistoryEntryActiveRef.current) return;
-    allowAddHistoryPopRef.current = true;
+  function consumeEditorHistoryEntry() {
+    if (!editorHistoryEntryActiveRef.current) return;
+    allowEditorHistoryPopRef.current = true;
     window.history.back();
   }
 
-  function leaveAddMode() {
-    setAddLeaveConfirmOpen(false);
+  function leaveEditorMode() {
+    setLeaveConfirmOpen(false);
     closeEditMode();
-    consumeAddHistoryEntry();
+    consumeEditorHistoryEntry();
   }
 
-  function requestLeaveAddMode() {
-    if (mode !== "add") {
-      closeEditMode();
+  function requestLeaveEditorMode() {
+    if (isEditorDirty) {
+      setLeaveConfirmOpen(true);
       return;
     }
 
-    if (isAddModeDirty) {
-      setAddLeaveConfirmOpen(true);
-      return;
-    }
-
-    leaveAddMode();
+    leaveEditorMode();
   }
 
   useEffect(() => {
@@ -1208,23 +1229,23 @@ export function MultilingualTextMap() {
 
   useEffect(() => {
     const onPopState = () => {
-      if (!addHistoryEntryActiveRef.current) return;
+      if (!editorHistoryEntryActiveRef.current) return;
 
-      if (allowAddHistoryPopRef.current) {
-        allowAddHistoryPopRef.current = false;
-        addHistoryEntryActiveRef.current = false;
+      if (allowEditorHistoryPopRef.current) {
+        allowEditorHistoryPopRef.current = false;
+        editorHistoryEntryActiveRef.current = false;
         return;
       }
 
-      if (mode !== "add") {
-        addHistoryEntryActiveRef.current = false;
+      if (!isEditing) {
+        editorHistoryEntryActiveRef.current = false;
         return;
       }
 
-      addHistoryEntryActiveRef.current = false;
-      if (isAddModeDirty) {
-        pushAddHistoryEntry();
-        setAddLeaveConfirmOpen(true);
+      editorHistoryEntryActiveRef.current = false;
+      if (isEditorDirty) {
+        pushEditorHistoryEntry();
+        setLeaveConfirmOpen(true);
         return;
       }
 
@@ -1233,7 +1254,7 @@ export function MultilingualTextMap() {
 
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
-  }, [isAddModeDirty, mode]);
+  }, [isEditing, isEditorDirty]);
 
   useEffect(() => {
     if (!isLoaded) return;
@@ -1333,7 +1354,7 @@ export function MultilingualTextMap() {
   }, [persistenceStatus.phase]);
 
   useEffect(() => {
-    if (persistenceStatus.phase !== "saving") return;
+    if (!isEditorDirty && persistenceStatus.phase !== "saving") return;
 
     const onBeforeUnload = (event: BeforeUnloadEvent) => {
       event.preventDefault();
@@ -1342,7 +1363,7 @@ export function MultilingualTextMap() {
 
     window.addEventListener("beforeunload", onBeforeUnload);
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
-  }, [persistenceStatus.phase]);
+  }, [isEditorDirty, persistenceStatus.phase]);
 
   useEffect(() => {
     if (!copyFeedback) return;
@@ -1459,13 +1480,6 @@ export function MultilingualTextMap() {
     document.addEventListener("keydown", onKeyDown, true);
     return () => document.removeEventListener("keydown", onKeyDown, true);
   }, [activeRegions, currentScreen?.id, isEditing, mode]);
-
-  useEffect(() => {
-    if (mode !== "edit" || !currentScreen) return;
-    setScreenForm(screenToForm(currentScreen));
-    setImageDraft(null);
-    setEditDraftRegions(null);
-  }, [currentScreen, mode]);
 
   useEffect(() => {
     if (!interaction || !editableImage || !isEditing) return;
@@ -1899,10 +1913,13 @@ export function MultilingualTextMap() {
   }
 
   function openAddMode(group?: string) {
-    pushAddHistoryEntry();
-    setAddLeaveConfirmOpen(false);
+    const initialForm = { ...defaultScreenForm, group: group ?? appState.groups?.[0] ?? defaultScreenForm.group };
+    initialScreenFormRef.current = initialForm;
+    initialEditRegionsRef.current = [];
+    pushEditorHistoryEntry();
+    setLeaveConfirmOpen(false);
     setMode("add");
-    setScreenForm({ ...defaultScreenForm, group: group ?? appState.groups?.[0] ?? defaultScreenForm.group });
+    setScreenForm(initialForm);
     setImageDraft(null);
     setDraftRegions([]);
     setEditDraftRegions(null);
@@ -2006,17 +2023,23 @@ export function MultilingualTextMap() {
 
   function openEditMode() {
     if (!currentScreen) return;
+    const initialForm = screenToForm(currentScreen);
+    const initialRegions = cloneRegions(regionsForScreen);
+    initialScreenFormRef.current = initialForm;
+    initialEditRegionsRef.current = initialRegions;
+    pushEditorHistoryEntry();
     setMode("edit");
-    setScreenForm(screenToForm(currentScreen));
+    setLeaveConfirmOpen(false);
+    setScreenForm(initialForm);
     setImageDraft(null);
     setDraftRegions([]);
-    setEditDraftRegions(null);
+    setEditDraftRegions(cloneRegions(initialRegions));
     setEditingCell(null);
     resetRegionHistory();
   }
 
   function closeEditMode() {
-    setAddLeaveConfirmOpen(false);
+    setLeaveConfirmOpen(false);
     setMode("view");
     setImageDraft(null);
     setDraftRegions([]);
@@ -2092,7 +2115,7 @@ export function MultilingualTextMap() {
         ],
       }));
       setSelectedScreenId(screen.id);
-      consumeAddHistoryEntry();
+      consumeEditorHistoryEntry();
       setMode("view");
       setScreenForm(defaultScreenForm);
       setImageDraft(null);
@@ -2152,6 +2175,7 @@ export function MultilingualTextMap() {
           )
         : state.regions,
     }));
+    consumeEditorHistoryEntry();
     setImageDraft(null);
     setEditDraftRegions(null);
     setMode("view");
@@ -2945,6 +2969,8 @@ export function MultilingualTextMap() {
 
       if (mode === "add") {
         setDraftRegions((regions) => [...regions, duplicate]);
+      } else if (editDraftRegions) {
+        setEditDraftRegions((regions) => [...(regions ?? []), duplicate]);
       } else {
         setAppState((state) => ({ ...state, regions: [...state.regions, duplicate] }));
       }
@@ -4132,25 +4158,25 @@ export function MultilingualTextMap() {
     );
   }
 
-  function renderAddLeaveConfirmDialog() {
-    if (!addLeaveConfirmOpen || mode !== "add") return null;
+  function renderEditorLeaveConfirmDialog() {
+    if (!leaveConfirmOpen || !isEditing) return null;
 
     return (
-      <div className="confirm-modal-backdrop" role="presentation" onClick={() => setAddLeaveConfirmOpen(false)}>
+      <div className="confirm-modal-backdrop" role="presentation" onClick={() => setLeaveConfirmOpen(false)}>
         <section
           className="confirm-modal"
           role="dialog"
           aria-modal="true"
-          aria-labelledby="add-leave-confirm-title"
+          aria-labelledby="editor-leave-confirm-title"
           onClick={(event) => event.stopPropagation()}
         >
-          <h2 id="add-leave-confirm-title">화면 추가를 종료하시겠습니까?</h2>
-          <p>작성 중인 내용은 저장되지 않습니다.</p>
+          <h2 id="editor-leave-confirm-title">저장하지 않고 나가시겠습니까?</h2>
+          <p>변경한 내용은 저장되지 않습니다.</p>
           <div className="confirm-actions">
-            <button type="button" className="confirm-cancel" onClick={() => setAddLeaveConfirmOpen(false)}>
+            <button type="button" className="confirm-cancel" onClick={() => setLeaveConfirmOpen(false)}>
               취소
             </button>
-            <button type="button" className="confirm-delete" onClick={leaveAddMode}>
+            <button type="button" className="confirm-delete" onClick={leaveEditorMode}>
               나가기
             </button>
           </div>
@@ -4178,7 +4204,7 @@ export function MultilingualTextMap() {
         />
 
         <div className="add-mode-title">
-          <button type="button" className="add-back-button" onClick={requestLeaveAddMode} aria-label="뒤로가기">
+          <button type="button" className="add-back-button" onClick={requestLeaveEditorMode} aria-label="뒤로가기">
             <BackArrowIcon />
           </button>
           <h1>{isEditMode ? "화면 수정" : "화면 추가"}</h1>
@@ -4412,7 +4438,7 @@ export function MultilingualTextMap() {
                   <h2>화면 수정</h2>
                   <p>등록과 편집 작업은 이 모드에서만 수행합니다.</p>
                 </div>
-                <button type="button" className="button secondary" onClick={closeEditMode}>
+                <button type="button" className="button secondary" onClick={requestLeaveEditorMode}>
                   조회로 돌아가기
                 </button>
               </div>
@@ -4652,7 +4678,7 @@ export function MultilingualTextMap() {
       {renderDeleteConfirmDialog()}
       {renderSaveConflictDialog()}
       {renderRegionDeleteConfirmDialog()}
-      {renderAddLeaveConfirmDialog()}
+      {renderEditorLeaveConfirmDialog()}
     </main>
   );
 }
