@@ -2021,9 +2021,12 @@ export function MultilingualTextMap() {
   }
 
   function handleShellPointerDown(event: React.PointerEvent<HTMLElement>) {
-    if (!selectedRegionId) return;
     const target = event.target;
     if (!(target instanceof Element)) return;
+    if (keyDialogRegionId && !target.closest(".key-dialog")) {
+      closeKeyDialog();
+    }
+    if (!selectedRegionId) return;
     if (target.closest("[data-region-selection-scope='true']")) return;
     setSelectedRegionId(undefined);
   }
