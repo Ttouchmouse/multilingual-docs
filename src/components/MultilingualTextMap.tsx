@@ -727,6 +727,7 @@ export function MultilingualTextMap() {
   const regionHistoryRef = useRef<RegionHistory>({ scope: "", undo: [], redo: [] });
   const interactionHistoryRecordedRef = useRef(false);
   const duplicateMoveAxisRef = useRef<MoveAxis | undefined>(undefined);
+  const rowKeyDialogTimerRef = useRef<number | undefined>(undefined);
   const addHistoryEntryActiveRef = useRef(false);
   const allowAddHistoryPopRef = useRef(false);
   const openGroupsLoadedRef = useRef(false);
@@ -998,10 +999,17 @@ export function MultilingualTextMap() {
   }
 
   function closeKeyDialog() {
+    cancelPendingRowKeyDialog();
     setKeyDialogRegionId(undefined);
     setKeyDialogAnchor(undefined);
     setPendingTranslationItemId(undefined);
     setTranslationQuery("");
+  }
+
+  function cancelPendingRowKeyDialog() {
+    if (rowKeyDialogTimerRef.current === undefined) return;
+    window.clearTimeout(rowKeyDialogTimerRef.current);
+    rowKeyDialogTimerRef.current = undefined;
   }
 
   function getRegionHistoryScope() {
@@ -2021,6 +2029,7 @@ export function MultilingualTextMap() {
   }
 
   function handleShellPointerDown(event: React.PointerEvent<HTMLElement>) {
+    cancelPendingRowKeyDialog();
     const target = event.target;
     if (!(target instanceof Element)) return;
     if (keyDialogRegionId && !target.closest(".key-dialog")) {
@@ -2392,6 +2401,23 @@ export function MultilingualTextMap() {
   function connectRegion(regionId: string, item: TranslationItem, options?: { closeDialog?: boolean }) {
     const region = activeRegions.find((candidate) => candidate.id === regionId);
 
+    if (region?.translationItemId === item.id) {
+      const shouldUpdateVisibleText = !region.visibleText;
+      const shouldUpdateStatus = region.status === "unlinked" || region.status === "needs_check";
+      if (shouldUpdateVisibleText || shouldUpdateStatus) {
+        updateRegion(regionId, {
+          visibleText: shouldUpdateVisibleText ? item.kr || item.en || item.key : region.visibleText,
+          status: shouldUpdateStatus ? "linked" : region.status,
+        });
+      }
+      setEditingCell(null);
+      setTranslationQuery("");
+      if (options?.closeDialog) {
+        closeKeyDialog();
+      }
+      return;
+    }
+
     updateRegion(regionId, {
       translationItemId: item.id,
       translationOverrides: undefined,
@@ -2661,6 +2687,19 @@ export function MultilingualTextMap() {
     if (!isScreenRegion(region)) return;
 
     window.requestAnimationFrame(() => scrollRegionIntoView(region, "auto"));
+  }
+
+  function selectRegionAndOpenKeyDialog(event: React.MouseEvent<HTMLTableRowElement>, region: TextRegion) {
+    selectRegionFromTable(region);
+    if (!isEditing) return;
+
+    const anchor = { x: event.clientX - 387, y: event.clientY + 12 };
+    cancelPendingRowKeyDialog();
+    rowKeyDialogTimerRef.current = window.setTimeout(() => {
+      rowKeyDialogTimerRef.current = undefined;
+      setEditingCell(null);
+      openKeyDialog(region, anchor);
+    }, 180);
   }
 
   function selectGlobalSearchMatch(match: GlobalSearchMatch) {
@@ -3168,7 +3207,7 @@ export function MultilingualTextMap() {
                     className={`translation-data-row ${selected ? "selected" : ""} ${
                       draggedRegionId === region.id ? "dragging" : ""
                     } ${dragOverRegionId === region.id ? "drop-target" : ""}`}
-                    onClick={() => selectRegionFromTable(region)}
+                    onClick={(event) => selectRegionAndOpenKeyDialog(event, region)}
                     onContextMenu={(event) => openRowContextMenu(event, region)}
                     onDragOver={(event) => {
                       if (!canReorderRows || !draggedRegionId || draggedRegionId === region.id) return;
@@ -3234,6 +3273,7 @@ export function MultilingualTextMap() {
                             }`}
                             onDoubleClick={(event) => {
                               event.stopPropagation();
+                              cancelPendingRowKeyDialog();
                               if (!isEditing) {
                                 void copyTextCellValue(displayValue, language.label);
                                 return;
