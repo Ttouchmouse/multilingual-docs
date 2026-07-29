@@ -804,11 +804,24 @@ label {
   width: min(360px, calc(100% - 48px)) !important;
 }
 
-.add-image-replace-button {
+.add-image-actions {
   position: absolute;
   top: 12px;
   right: 12px;
   z-index: 12;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.add-auto-recognize-control {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.add-image-replace-button,
+.add-auto-recognize-button {
   width: 56px;
   height: 30px;
   border: 1px solid rgba(0, 27, 55, 0.12);
@@ -820,6 +833,113 @@ label {
   font-weight: 700;
   line-height: 18px;
   cursor: pointer;
+}
+
+.add-auto-recognize-button {
+  width: auto;
+  min-width: 96px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border-color: #3182f6;
+  background: #3182f6;
+  color: #fff;
+  box-shadow: 0 4px 16px rgba(49, 130, 246, 0.22);
+}
+
+.add-auto-recognize-button:disabled {
+  cursor: wait;
+  opacity: 0.72;
+}
+
+.add-auto-recognize-info {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  width: 16px;
+  height: 16px;
+  display: grid;
+  place-items: center;
+  color: rgba(255, 255, 255, 0.9);
+  outline: none;
+  transform: translateY(-50%);
+  cursor: help;
+}
+
+.add-auto-recognize-info svg {
+  width: 16px;
+  height: 16px;
+  display: block;
+}
+
+.add-auto-recognize-button {
+  padding: 0 30px 0 12px;
+}
+
+.add-auto-recognize-label,
+.add-auto-recognize-usage {
+  display: block;
+  white-space: nowrap;
+}
+
+.add-auto-recognize-usage {
+  color: rgba(255, 255, 255, 0.68);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 14px;
+}
+
+.add-auto-recognize-tooltip {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: -64px;
+  z-index: 30;
+  width: 292px;
+  display: none;
+  gap: 6px;
+  border-radius: 8px;
+  background: #333d4b;
+  color: #ffffff;
+  padding: 12px;
+  box-shadow: 0 6px 20px rgba(0, 27, 55, 0.2);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 17px;
+  text-align: left;
+}
+
+.add-auto-recognize-tooltip::before {
+  position: absolute;
+  top: -5px;
+  right: 68px;
+  width: 10px;
+  height: 10px;
+  background: #333d4b;
+  content: "";
+  transform: rotate(45deg);
+}
+
+.add-auto-recognize-tooltip strong,
+.add-auto-recognize-tooltip span {
+  position: relative;
+  display: block;
+}
+
+.add-auto-recognize-tooltip strong {
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.add-auto-recognize-info:hover .add-auto-recognize-tooltip,
+.add-auto-recognize-info:focus .add-auto-recognize-tooltip,
+.add-auto-recognize-info:focus-visible .add-auto-recognize-tooltip {
+  display: grid;
+}
+
+.add-auto-recognize-info:focus-visible {
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.72);
 }
 
 .add-image-replace-button:hover {
@@ -1021,13 +1141,69 @@ label {
   padding: 0 20px 28px;
 }
 
+.add-results-head {
+  min-width: 0;
+  min-height: 36px;
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 8px;
+}
+
 .add-results-title {
-  margin: 0 0 8px;
+  flex: 0 0 auto;
+  margin: 0;
   color: #2e394a;
   font-size: 20px;
   font-weight: 700;
   line-height: 28px;
   letter-spacing: 0;
+}
+
+.auto-recognition-status {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  padding-top: 3px;
+  color: #6b7684;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.auto-recognition-status strong {
+  color: #3182f6;
+  font-size: inherit;
+}
+
+.auto-recognition-status.error {
+  color: #e5484d;
+}
+
+.auto-unlinked-delete-button {
+  flex: 0 0 auto;
+  min-height: 32px;
+  margin-left: auto;
+  border: 1px solid #f2b8b8;
+  border-radius: 8px;
+  padding: 0 12px;
+  background: #fff;
+  color: #e5484d;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 18px;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+
+.auto-unlinked-delete-button:hover {
+  background: #fff5f5;
+}
+
+.auto-unlinked-delete-button:focus-visible {
+  outline: 2px solid rgba(229, 72, 77, 0.24);
+  outline-offset: 2px;
 }
 
 .add-empty-guide {
@@ -2134,6 +2310,33 @@ label {
 
 .translation-cell-value {
   display: block;
+}
+
+.translation-ai-tag {
+  display: inline-flex;
+  align-items: center;
+  margin-top: 6px;
+  border-radius: 4px;
+  padding: 3px 6px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 14px;
+  white-space: nowrap;
+}
+
+.translation-ai-tag.link {
+  background: #e8f3ff;
+  color: #1b64da;
+}
+
+.translation-ai-tag.review {
+  background: #fff3d6;
+  color: #9a6700;
+}
+
+.translation-ai-tag.none {
+  background: #f2f4f6;
+  color: #6b7684;
 }
 
 .translation-update-candidate-button {

@@ -28,6 +28,11 @@ import {
   type SupabaseLoadStatus,
 } from "@/lib/storage";
 import { uploadScreenImage } from "@/lib/supabase-storage";
+import { AI_AUTO_RECOGNITION_ENABLED } from "@/lib/ai-feature";
+import {
+  OCR_FREE_MONTHLY_LIMIT,
+  type OcrUsageSummary,
+} from "@/lib/ocr-usage";
 
 type ImageRect = Pick<TextRegion, "x" | "y" | "width" | "height">;
 type AppMode = "view" | "add" | "edit";
@@ -204,6 +209,79 @@ type RegionOcrState = {
   error?: string;
 };
 
+type AutoRecognitionPhase = "idle" | "ocr" | "ai" | "done" | "error";
+
+type AutoRecognitionState = {
+  phase: AutoRecognitionPhase;
+  progress: number;
+  message: string;
+  detectedCount: number;
+  excludedCount: number;
+  mergedCount: number;
+  highConfidenceCount: number;
+  lowConfidenceCount: number;
+  unlinkedCount: number;
+  ocrProvider?: "google-vision" | "tesseract";
+  inputTokens?: number;
+  outputTokens?: number;
+};
+
+type AutoRecognitionSuggestion = {
+  decision: "link" | "review" | "none";
+  confidence: number;
+  reason: string;
+};
+
+type AiRegionType =
+  | "ui_text"
+  | "logo"
+  | "status_bar"
+  | "illustration_noise"
+  | "icon"
+  | "duplicate"
+  | "uncertain";
+
+type AiRegionSuggestion = {
+  regionId: string;
+  correctedText: string;
+  keepRegion: boolean;
+  regionType: AiRegionType;
+  translationItemId: string | null;
+  confidence: number;
+  decision: "link" | "review" | "none";
+  reason: string;
+};
+
+type AiTextGroupSuggestion = {
+  groupId: string;
+  regionIds: string[];
+  mergedText: string;
+  reason: string;
+};
+
+type OcrDetectedLine = {
+  text: string;
+  confidence: number;
+  rect: ImageRect;
+  mergedFrom?: number;
+};
+
+type GoogleVisionOcrResponse = {
+  provider?: "google-vision";
+  fullText?: string;
+  lines?: OcrDetectedLine[];
+  usage?: OcrUsageSummary;
+  error?: string;
+};
+
+type PreparedOcrImage = {
+  dataUrl: string;
+  width: number;
+  height: number;
+  sourceWidth: number;
+  sourceHeight: number;
+};
+
 type PersistenceStatus = {
   phase: "loading" | "ready" | "saving" | "saved" | "warning" | "error";
   message: string;
@@ -212,6 +290,22 @@ type PersistenceStatus = {
 
 const DRAFT_SCREEN_ID = "__draft_screen__";
 const OPEN_GROUPS_STORAGE_KEY = "tg-multilingual-docs:open-groups";
+const AUTO_LINK_CONFIDENCE_THRESHOLD = 0.9;
+const AUTO_OCR_MAX_REGIONS = 80;
+
+function getInitialAutoRecognitionState(): AutoRecognitionState {
+  return {
+    phase: "idle",
+    progress: 0,
+    message: "",
+    detectedCount: 0,
+    excludedCount: 0,
+    mergedCount: 0,
+    highConfidenceCount: 0,
+    lowConfidenceCount: 0,
+    unlinkedCount: 0,
+  };
+}
 
 const defaultScreenForm: ScreenForm = {
   name: "",
@@ -525,6 +619,1033 @@ async function cropImageRegion(imageTarget: ImageTarget, region: ImageRect) {
   return canvas.toDataURL("image/png");
 }
 
+function createAbortError() {
+  const error = new Error("자동 인식 요청이 취소되었습니다.");
+  error.name = "AbortError";
+  return error;
+}
+
+function throwIfAborted(signal?: AbortSignal) {
+  if (signal?.aborted) throw createAbortError();
+}
+
+function isAbortError(error: unknown) {
+  return error instanceof Error && error.name === "AbortError";
+}
+
+async function recognizeWithGoogleVision(imageDataUrl: string, signal?: AbortSignal) {
+  throwIfAborted(signal);
+  const response = await fetch("/api/ocr/google", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ imageDataUrl }),
+    signal,
+  });
+  const responseBody = (await response.json()) as GoogleVisionOcrResponse;
+
+  if (!response.ok) {
+    throw new Error(responseBody.error || "Google Vision OCR 요청에 실패했습니다.");
+  }
+
+  return responseBody;
+}
+
+function normalizeOcrText(text: string) {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+function correctCommonOcrUiArtifact(text: string) {
+  const normalizedText = normalizeOcrText(text);
+  const compactText = normalizedText.toLowerCase().replace(/[^a-z0-9]/g, "");
+
+  if (["c00", "coo", "0r"].includes(compactText)) {
+    return "OR";
+  }
+
+  return normalizedText;
+}
+
+function getRectOverlapRatio(left: ImageRect, right: ImageRect) {
+  const overlapWidth = Math.max(0, Math.min(left.x + left.width, right.x + right.width) - Math.max(left.x, right.x));
+  const overlapHeight = Math.max(
+    0,
+    Math.min(left.y + left.height, right.y + right.height) - Math.max(left.y, right.y),
+  );
+  const overlapArea = overlapWidth * overlapHeight;
+  const smallerArea = Math.min(left.width * left.height, right.width * right.height);
+  return smallerArea > 0 ? overlapArea / smallerArea : 0;
+}
+
+function normalizeOcrComparisonText(text: string) {
+  return normalizeOcrText(text).toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
+}
+
+function areOcrTextsEquivalent(left: string, right: string) {
+  const normalizedLeft = normalizeOcrComparisonText(left);
+  const normalizedRight = normalizeOcrComparisonText(right);
+  if (!normalizedLeft || !normalizedRight) return false;
+  if (normalizedLeft === normalizedRight) return true;
+
+  const shorter =
+    normalizedLeft.length <= normalizedRight.length ? normalizedLeft : normalizedRight;
+  const longer =
+    normalizedLeft.length > normalizedRight.length ? normalizedLeft : normalizedRight;
+
+  return shorter.length / longer.length >= 0.75 && longer.includes(shorter);
+}
+
+function deduplicateOcrLines(lines: OcrDetectedLine[]) {
+  const deduplicated: OcrDetectedLine[] = [];
+
+  for (const line of lines) {
+    const duplicateIndex = deduplicated.findIndex(
+      (candidate) =>
+        areOcrTextsEquivalent(candidate.text, line.text) &&
+        getRectOverlapRatio(candidate.rect, line.rect) >= 0.7,
+    );
+    if (duplicateIndex === -1) {
+      deduplicated.push(line);
+      continue;
+    }
+
+    const duplicate = deduplicated[duplicateIndex];
+    const duplicateArea = duplicate.rect.width * duplicate.rect.height;
+    const lineArea = line.rect.width * line.rect.height;
+    if (lineArea < duplicateArea * 0.85 && line.confidence >= duplicate.confidence - 12) {
+      deduplicated[duplicateIndex] = line;
+    }
+  }
+
+  return deduplicated;
+}
+
+function removeCompositeOcrDuplicates(lines: OcrDetectedLine[]) {
+  return lines.filter((line, lineIndex) => {
+    const normalizedLine = normalizeOcrComparisonText(line.text);
+    if (normalizedLine.length < 8) return true;
+
+    const lineArea = line.rect.width * line.rect.height;
+    const childTexts = new Set(
+      lines
+        .filter((candidate, candidateIndex) => {
+          if (candidateIndex === lineIndex) return false;
+          const candidateArea = candidate.rect.width * candidate.rect.height;
+          const normalizedCandidate = normalizeOcrComparisonText(candidate.text);
+
+          return (
+            candidateArea < lineArea * 0.85 &&
+            normalizedCandidate.length >= 3 &&
+            normalizedLine.includes(normalizedCandidate) &&
+            getRectOverlapRatio(line.rect, candidate.rect) >= 0.65
+          );
+        })
+        .map((candidate) => normalizeOcrComparisonText(candidate.text)),
+    );
+
+    if (childTexts.size < 2) return true;
+    const coveredCharacters = Array.from(childTexts).reduce(
+      (sum, childText) => sum + childText.length,
+      0,
+    );
+
+    return coveredCharacters < normalizedLine.length * 0.72;
+  });
+}
+
+type AiTextRegionGroup = {
+  anchorId: string;
+  mergedText: string;
+  rect: ImageRect;
+};
+
+function getHorizontalOverlapRatio(left: ImageRect, right: ImageRect) {
+  const overlapWidth = Math.max(
+    0,
+    Math.min(left.x + left.width, right.x + right.width) - Math.max(left.x, right.x),
+  );
+  return overlapWidth / Math.max(1, Math.min(left.width, right.width));
+}
+
+function buildAiTextRegionGroups(
+  regions: TextRegion[],
+  textGroups: AiTextGroupSuggestion[],
+  suggestionByRegionId: Map<string, AiRegionSuggestion>,
+) {
+  const regionById = new Map(regions.map((region) => [region.id, region]));
+  const groupsByRegionId = new Map<string, AiTextRegionGroup>();
+  let mergedCount = 0;
+
+  for (const textGroup of textGroups) {
+    const regionIds = Array.from(new Set(textGroup.regionIds)).slice(0, 6);
+    if (regionIds.length < 2) continue;
+    const suggestions = regionIds
+      .map((regionId) => suggestionByRegionId.get(regionId))
+      .filter((suggestion): suggestion is AiRegionSuggestion => Boolean(suggestion));
+    if (
+      suggestions.length !== regionIds.length ||
+      suggestions.some(
+        (suggestion) =>
+          !suggestion.keepRegion || suggestion.regionType !== "ui_text",
+      ) ||
+      regionIds.some((regionId) => groupsByRegionId.has(regionId))
+    ) {
+      continue;
+    }
+
+    const members = regionIds
+      .map((regionId) => regionById.get(regionId))
+      .filter((region): region is TextRegion => Boolean(region))
+      .sort((left, right) => left.y - right.y || left.x - right.x);
+    if (members.length !== regionIds.length) continue;
+
+    const groupText = normalizeOcrText(textGroup.mergedText);
+    const normalizedGroupText = normalizeOcrComparisonText(groupText);
+    const memberTexts = suggestions
+      .map((suggestion) => normalizeOcrComparisonText(suggestion.correctedText))
+      .filter(Boolean);
+    const includedCharacters = memberTexts.reduce(
+      (sum, memberText) =>
+        sum + (normalizedGroupText.includes(memberText) ? memberText.length : 0),
+      0,
+    );
+    const totalMemberCharacters = memberTexts.reduce(
+      (sum, memberText) => sum + memberText.length,
+      0,
+    );
+    if (
+      normalizedGroupText.length < 6 ||
+      includedCharacters < totalMemberCharacters * 0.6
+    ) {
+      continue;
+    }
+
+    const isSpatiallySafe = members.slice(1).every((member, index) => {
+      const previous = members[index];
+      const previousBottom = previous.y + previous.height;
+      const verticalGap = member.y - previousBottom;
+      const maxHeight = Math.max(previous.height, member.height);
+      const heightRatio =
+        Math.min(previous.height, member.height) / Math.max(1, maxHeight);
+      const leftAligned =
+        Math.abs(previous.x - member.x) <= Math.max(20, maxHeight * 1.5);
+      const horizontallyRelated =
+        leftAligned || getHorizontalOverlapRatio(previous, member) >= 0.35;
+
+      return (
+        member.y >= previous.y + previous.height * 0.25 &&
+        verticalGap >= -maxHeight * 0.3 &&
+        verticalGap <= Math.max(24, maxHeight * 1.5) &&
+        heightRatio >= 0.55 &&
+        horizontallyRelated
+      );
+    });
+    if (!isSpatiallySafe) continue;
+
+    const left = Math.min(...members.map((region) => region.x));
+    const top = Math.min(...members.map((region) => region.y));
+    const right = Math.max(...members.map((region) => region.x + region.width));
+    const bottom = Math.max(...members.map((region) => region.y + region.height));
+    const group: AiTextRegionGroup = {
+      anchorId: members[0].id,
+      mergedText: groupText,
+      rect: {
+        x: left,
+        y: top,
+        width: right - left,
+        height: bottom - top,
+      },
+    };
+
+    for (const member of members) {
+      groupsByRegionId.set(member.id, group);
+    }
+    mergedCount += 1;
+  }
+
+  return { groupsByRegionId, mergedCount };
+}
+
+function getOcrLineQuality(line: OcrDetectedLine) {
+  const normalizedText = normalizeOcrText(line.text).toLowerCase();
+  return line.confidence + (COMMON_SHORT_UI_LABELS.has(normalizedText) ? 20 : 0);
+}
+
+function mergeOcrPassResults(primaryLines: OcrDetectedLine[], fallbackLines: OcrDetectedLine[]) {
+  const merged = [...primaryLines];
+
+  for (const fallbackLine of fallbackLines) {
+    const overlappingPrimaryLines = primaryLines.filter(
+      (primaryLine) => getRectOverlapRatio(primaryLine.rect, fallbackLine.rect) >= 0.45,
+    );
+    if (overlappingPrimaryLines.length >= 2) continue;
+
+    const duplicateIndex = merged.findIndex((primaryLine) => {
+      return (
+        areOcrTextsEquivalent(primaryLine.text, fallbackLine.text) &&
+        getRectOverlapRatio(primaryLine.rect, fallbackLine.rect) >= 0.7
+      );
+    });
+
+    if (duplicateIndex === -1) {
+      merged.push(fallbackLine);
+      continue;
+    }
+
+    if (getOcrLineQuality(fallbackLine) > getOcrLineQuality(merged[duplicateIndex])) {
+      merged[duplicateIndex] = fallbackLine;
+    }
+  }
+
+  return merged;
+}
+
+function createInvertedGrayscaleCanvas(source: HTMLCanvasElement) {
+  const canvas = document.createElement("canvas");
+  canvas.width = source.width;
+  canvas.height = source.height;
+
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  if (!context) throw new Error("보조 OCR 캔버스를 생성할 수 없습니다.");
+
+  context.drawImage(source, 0, 0);
+  const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+  const pixels = imageData.data;
+
+  for (let index = 0; index < pixels.length; index += 4) {
+    const grayscale = Math.round(
+      pixels[index] * 0.299 + pixels[index + 1] * 0.587 + pixels[index + 2] * 0.114,
+    );
+    const inverted = 255 - grayscale;
+    pixels[index] = inverted;
+    pixels[index + 1] = inverted;
+    pixels[index + 2] = inverted;
+    pixels[index + 3] = 255;
+  }
+
+  context.putImageData(imageData, 0, 0);
+  return canvas;
+}
+
+function createInvertedHighContrastCanvas(source: HTMLCanvasElement) {
+  const canvas = document.createElement("canvas");
+  canvas.width = source.width;
+  canvas.height = source.height;
+
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  if (!context) throw new Error("고대비 OCR 캔버스를 생성할 수 없습니다.");
+
+  context.drawImage(source, 0, 0);
+  const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+  const pixels = imageData.data;
+
+  for (let index = 0; index < pixels.length; index += 4) {
+    const grayscale = Math.round(
+      pixels[index] * 0.299 + pixels[index + 1] * 0.587 + pixels[index + 2] * 0.114,
+    );
+    const binary = 255 - grayscale >= 160 ? 255 : 0;
+    pixels[index] = binary;
+    pixels[index + 1] = binary;
+    pixels[index + 2] = binary;
+    pixels[index + 3] = 255;
+  }
+
+  context.putImageData(imageData, 0, 0);
+  return canvas;
+}
+
+function hasFlatUiBackground(
+  source: HTMLCanvasElement,
+  line: OcrDetectedLine,
+  scale: number,
+) {
+  const context = source.getContext("2d", { willReadFrequently: true });
+  if (!context) return false;
+
+  const padding = Math.max(4, line.rect.height * 0.45);
+  const left = clamp(Math.floor((line.rect.x - padding) * scale), 0, source.width - 1);
+  const top = clamp(Math.floor((line.rect.y - padding) * scale), 0, source.height - 1);
+  const right = clamp(
+    Math.ceil((line.rect.x + line.rect.width + padding) * scale),
+    left + 1,
+    source.width,
+  );
+  const bottom = clamp(
+    Math.ceil((line.rect.y + line.rect.height + padding) * scale),
+    top + 1,
+    source.height,
+  );
+  const width = Math.max(1, right - left);
+  const height = Math.max(1, bottom - top);
+  const pixels = context.getImageData(left, top, width, height).data;
+  const sampleStride = Math.max(1, Math.floor(Math.sqrt((width * height) / 2500)));
+  const colorBins = new Map<number, number>();
+  let sampledPixels = 0;
+
+  for (let y = 0; y < height; y += sampleStride) {
+    for (let x = 0; x < width; x += sampleStride) {
+      const index = (y * width + x) * 4;
+      if (pixels[index + 3] < 128) continue;
+
+      const red = pixels[index] >> 5;
+      const green = pixels[index + 1] >> 5;
+      const blue = pixels[index + 2] >> 5;
+      const colorKey = (red << 6) | (green << 3) | blue;
+      colorBins.set(colorKey, (colorBins.get(colorKey) ?? 0) + 1);
+      sampledPixels += 1;
+    }
+  }
+
+  if (sampledPixels === 0) return false;
+  const dominantPixels = Math.max(...colorBins.values());
+  return dominantPixels / sampledPixels >= 0.38;
+}
+
+function mergeOcrParagraphLines(lines: OcrDetectedLine[]) {
+  if (lines.length <= 1) return lines;
+
+  const sortedLines = [...lines].sort(
+    (left, right) => left.rect.y - right.rect.y || left.rect.x - right.rect.x,
+  );
+  const shouldMergeParagraph = sortedLines.slice(1).every((line, index) => {
+    const previous = sortedLines[index];
+    const previousBottom = previous.rect.y + previous.rect.height;
+    const verticalGap = line.rect.y - previousBottom;
+    const maxHeight = Math.max(previous.rect.height, line.rect.height);
+    const minHeight = Math.min(previous.rect.height, line.rect.height);
+    const heightRatio = minHeight / Math.max(1, maxHeight);
+    const leftAligned =
+      Math.abs(previous.rect.x - line.rect.x) <= Math.max(8, maxHeight * 0.6);
+    const previousCenter = previous.rect.x + previous.rect.width / 2;
+    const lineCenter = line.rect.x + line.rect.width / 2;
+    const centerAligned =
+      Math.abs(previousCenter - lineCenter) <= Math.max(10, maxHeight * 0.75);
+
+    return (
+      heightRatio >= 0.72 &&
+      verticalGap >= -maxHeight * 0.2 &&
+      verticalGap <= Math.max(5, maxHeight * 0.4) &&
+      (leftAligned || centerAligned)
+    );
+  });
+  if (!shouldMergeParagraph) return sortedLines;
+
+  const left = Math.min(...sortedLines.map((line) => line.rect.x));
+  const top = Math.min(...sortedLines.map((line) => line.rect.y));
+  const right = Math.max(...sortedLines.map((line) => line.rect.x + line.rect.width));
+  const bottom = Math.max(...sortedLines.map((line) => line.rect.y + line.rect.height));
+  const totalArea = sortedLines.reduce(
+    (sum, line) => sum + Math.max(1, line.rect.width * line.rect.height),
+    0,
+  );
+  const confidence = Math.round(
+    sortedLines.reduce(
+      (sum, line) => sum + line.confidence * Math.max(1, line.rect.width * line.rect.height),
+      0,
+    ) / totalArea,
+  );
+
+  return [
+    {
+      text: normalizeOcrText(sortedLines.map((line) => line.text).join(" ")),
+      confidence,
+      mergedFrom: sortedLines.reduce((sum, line) => sum + (line.mergedFrom ?? 1), 0),
+      rect: {
+        x: left,
+        y: top,
+        width: right - left,
+        height: bottom - top,
+      },
+    },
+  ];
+}
+
+function mergeOcrLinePair(upper: OcrDetectedLine, lower: OcrDetectedLine): OcrDetectedLine {
+  const left = Math.min(upper.rect.x, lower.rect.x);
+  const top = Math.min(upper.rect.y, lower.rect.y);
+  const right = Math.max(upper.rect.x + upper.rect.width, lower.rect.x + lower.rect.width);
+  const bottom = Math.max(upper.rect.y + upper.rect.height, lower.rect.y + lower.rect.height);
+  const upperArea = Math.max(1, upper.rect.width * upper.rect.height);
+  const lowerArea = Math.max(1, lower.rect.width * lower.rect.height);
+
+  return {
+    text: normalizeOcrText(`${upper.text} ${lower.text}`),
+    confidence: Math.round(
+      (upper.confidence * upperArea + lower.confidence * lowerArea) / (upperArea + lowerArea),
+    ),
+    mergedFrom: (upper.mergedFrom ?? 1) + (lower.mergedFrom ?? 1),
+    rect: {
+      x: left,
+      y: top,
+      width: right - left,
+      height: bottom - top,
+    },
+  };
+}
+
+function shouldMergeAdjacentOcrLines(upper: OcrDetectedLine, lower: OcrDetectedLine) {
+  const upperBottom = upper.rect.y + upper.rect.height;
+  const verticalGap = lower.rect.y - upperBottom;
+  const maxHeight = Math.max(upper.rect.height, lower.rect.height);
+  const isFollowingLine =
+    lower.rect.y > upper.rect.y + upper.rect.height * 0.45 &&
+    verticalGap >= -maxHeight * 0.3 &&
+    verticalGap <= Math.max(14, maxHeight * 0.9);
+  if (!isFollowingLine) return false;
+
+  const upperCenter = upper.rect.x + upper.rect.width / 2;
+  const lowerCenter = lower.rect.x + lower.rect.width / 2;
+  const centerAligned = Math.abs(upperCenter - lowerCenter) <= Math.max(10, maxHeight * 0.75);
+  const leftAligned = Math.abs(upper.rect.x - lower.rect.x) <= Math.max(8, maxHeight * 0.5);
+  const lowerStartsLowercase = /^\p{Ll}/u.test(lower.text);
+  const upperNeedsContinuation =
+    /(?:[,;:()[\]/{-]|\b(?:to|of|for|and|or|the|a|an|in|on|with|from|by|at|is|are|your))$/i.test(
+      upper.text.trim(),
+    );
+  const longBodyContinuation =
+    leftAligned && upper.text.length >= 24 && lowerStartsLowercase;
+
+  return centerAligned || upperNeedsContinuation || longBodyContinuation;
+}
+
+function mergeAdjacentOcrLines(lines: OcrDetectedLine[]) {
+  const sortedLines = [...lines].sort(
+    (left, right) => left.rect.y - right.rect.y || left.rect.x - right.rect.x,
+  );
+  const mergedLines: OcrDetectedLine[] = [];
+
+  for (const line of sortedLines) {
+    const previous = mergedLines.at(-1);
+    if (previous && shouldMergeAdjacentOcrLines(previous, line)) {
+      mergedLines[mergedLines.length - 1] = mergeOcrLinePair(previous, line);
+    } else {
+      mergedLines.push(line);
+    }
+  }
+
+  return mergedLines;
+}
+
+const COMMON_SHORT_UI_LABELS = new Set([
+  "yes",
+  "no",
+  "go",
+  "ok",
+  "or",
+  "cancel",
+  "confirm",
+  "continue",
+  "submit",
+  "start",
+  "next",
+  "back",
+  "done",
+  "skip",
+  "close",
+  "retry",
+  "allow",
+  "deny",
+  "save",
+  "delete",
+  "edit",
+  "add",
+  "apply",
+  "buy",
+  "pay",
+  "join",
+  "login",
+  "logout",
+  "sign in",
+  "sign up",
+  "sign in with email",
+  "recently used to sign in",
+  "register",
+  "subscribe",
+  "unlock",
+  "more",
+  "learn more",
+  "see more",
+  "read more",
+  "accept",
+  "decline",
+  "agree",
+  "disagree",
+  "later",
+  "not now",
+  "download",
+  "upload",
+  "send",
+  "open",
+  "search",
+  "help",
+  "home",
+  "예",
+  "아니요",
+  "확인",
+  "취소",
+  "계속",
+  "다음",
+  "뒤로",
+  "완료",
+  "닫기",
+  "저장",
+  "삭제",
+  "수정",
+  "추가",
+]);
+
+function shouldPreserveExcludedRegion(
+  region: TextRegion,
+  confidence: number | undefined,
+  candidates: ReturnType<typeof searchTranslationCandidates>,
+) {
+  if ((confidence ?? 0) < 50) return false;
+
+  const normalizedText = normalizeOcrText(region.visibleText).toLowerCase();
+  const words = region.visibleText.match(/\p{L}[\p{L}\p{N}'’_-]*/gu) ?? [];
+  const visibleCharacters = Array.from(region.visibleText).filter((character) =>
+    /[\p{L}\p{N}]/u.test(character),
+  ).length;
+  const visibleCharacterRatio =
+    visibleCharacters / Math.max(Array.from(region.visibleText).length, 1);
+  const isReadableSentence =
+    words.length >= 2 && visibleCharacters >= 6 && visibleCharacterRatio >= 0.55;
+  const hasExactTranslationMatch = candidates.some(({ matchType }) =>
+    matchType.endsWith("완전 일치"),
+  );
+
+  return (
+    COMMON_SHORT_UI_LABELS.has(normalizedText) ||
+    isReadableSentence ||
+    (hasExactTranslationMatch && visibleCharacters >= 2 && visibleCharacterRatio >= 0.7)
+  );
+}
+
+function shouldExcludeWeakOcrFragment(
+  region: TextRegion,
+  candidates: ReturnType<typeof searchTranslationCandidates>,
+  aiConfidence = 0,
+) {
+  const normalizedText = normalizeOcrText(region.visibleText).toLowerCase();
+  if (COMMON_SHORT_UI_LABELS.has(normalizedText)) return false;
+
+  const visibleCharacters = Array.from(normalizedText).filter((character) =>
+    /[\p{L}\p{N}]/u.test(character),
+  ).length;
+  const hasExactTranslationMatch = candidates.some(({ matchType }) =>
+    matchType.endsWith("완전 일치"),
+  );
+  const isShortUppercaseLatinArtifact = /^[A-Z]{1,2}$/.test(
+    normalizeOcrText(region.visibleText),
+  );
+
+  return (
+    (visibleCharacters <= 2 && !hasExactTranslationMatch) ||
+    (isShortUppercaseLatinArtifact && aiConfidence < 0.5)
+  );
+}
+
+async function prepareAiImageDataUrl(imageTarget: ImageTarget, regions: TextRegion[]) {
+  const image = await loadImageElement(imageTarget.imageUrl);
+  const content = getImageContentSize(imageTarget);
+  const maxDimension = 1600;
+  const scale = Math.min(1, maxDimension / Math.max(content.width, content.height));
+  const width = Math.max(1, Math.round(content.width * scale));
+  const height = Math.max(1, Math.round(content.height * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("AI 분석용 이미지를 생성할 수 없습니다.");
+
+  context.fillStyle = "#ffffff";
+  context.fillRect(0, 0, width, height);
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = "high";
+  context.drawImage(image, 0, 0, content.width, content.height, 0, 0, width, height);
+
+  const scaleX = width / content.width;
+  const scaleY = height / content.height;
+  context.lineWidth = 2;
+  context.font = "700 13px Arial, sans-serif";
+  context.textBaseline = "top";
+
+  regions.forEach((region, index) => {
+    const x = region.x * scaleX;
+    const y = region.y * scaleY;
+    const regionWidth = region.width * scaleX;
+    const regionHeight = region.height * scaleY;
+    const label = String(index + 1);
+    const labelWidth = Math.max(20, context.measureText(label).width + 10);
+    const labelY = y >= 20 ? y - 18 : y;
+
+    context.strokeStyle = "#ff3b30";
+    context.strokeRect(x, y, regionWidth, regionHeight);
+    context.fillStyle = "#ff3b30";
+    context.fillRect(x, labelY, labelWidth, 18);
+    context.fillStyle = "#ffffff";
+    context.fillText(label, x + 5, labelY + 2);
+  });
+
+  return canvas.toDataURL("image/jpeg", 0.82);
+}
+
+async function prepareOcrImageDataUrl(imageTarget: ImageTarget): Promise<PreparedOcrImage> {
+  const image = await loadImageElement(imageTarget.imageUrl);
+  const content = getImageContentSize(imageTarget);
+  const targetWidthScale = content.width > 0 ? 1080 / content.width : 1;
+  const pixelLimitScale = Math.sqrt(14_000_000 / Math.max(1, content.width * content.height));
+  const initialScale = Math.max(0.5, Math.min(2.5, targetWidthScale, pixelLimitScale));
+  let width = Math.max(1, Math.round(content.width * initialScale));
+  let height = Math.max(1, Math.round(content.height * initialScale));
+
+  const renderCanvas = (targetWidth: number, targetHeight: number) => {
+    const canvas = document.createElement("canvas");
+    canvas.width = targetWidth;
+    canvas.height = targetHeight;
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("Google Vision OCR 이미지를 생성할 수 없습니다.");
+
+    context.fillStyle = "#ffffff";
+    context.fillRect(0, 0, targetWidth, targetHeight);
+    context.imageSmoothingEnabled = true;
+    context.imageSmoothingQuality = "high";
+    context.drawImage(
+      image,
+      0,
+      0,
+      content.width,
+      content.height,
+      0,
+      0,
+      targetWidth,
+      targetHeight,
+    );
+    return canvas;
+  };
+
+  let canvas = renderCanvas(width, height);
+  let quality = 0.9;
+  let dataUrl = canvas.toDataURL("image/jpeg", quality);
+
+  while (dataUrl.length > 3_700_000 && quality > 0.65) {
+    quality -= 0.1;
+    dataUrl = canvas.toDataURL("image/jpeg", quality);
+  }
+
+  if (dataUrl.length > 3_700_000) {
+    const resizeScale = Math.max(0.55, Math.sqrt(3_400_000 / dataUrl.length) * 0.95);
+    width = Math.max(1, Math.round(width * resizeScale));
+    height = Math.max(1, Math.round(height * resizeScale));
+    canvas = renderCanvas(width, height);
+    dataUrl = canvas.toDataURL("image/jpeg", 0.72);
+  }
+
+  if (dataUrl.length > 3_900_000) {
+    throw new Error("Google Vision OCR용 이미지 크기를 제한 내로 줄일 수 없습니다.");
+  }
+
+  return {
+    dataUrl,
+    width,
+    height,
+    sourceWidth: content.width,
+    sourceHeight: content.height,
+  };
+}
+
+function mapGoogleVisionLines(preparedImage: PreparedOcrImage, lines: OcrDetectedLine[]) {
+  const scaleX = preparedImage.sourceWidth / preparedImage.width;
+  const scaleY = preparedImage.sourceHeight / preparedImage.height;
+
+  return lines
+    .flatMap((line) => {
+      const text = correctCommonOcrUiArtifact(line.text);
+      const visibleCharacters = Array.from(text).filter((character) =>
+        /[\p{L}\p{N}]/u.test(character),
+      ).length;
+      if (!text || text.length > 500 || visibleCharacters === 0) return [];
+
+      const x = line.rect.x * scaleX;
+      const y = line.rect.y * scaleY;
+      const width = line.rect.width * scaleX;
+      const height = line.rect.height * scaleY;
+      const paddingX = Math.max(4, Math.min(12, height * 0.25));
+      const paddingY = Math.max(2, Math.min(8, height * 0.12));
+      const rectX = clamp(x - paddingX, 0, preparedImage.sourceWidth);
+      const rectY = clamp(y - paddingY, 0, preparedImage.sourceHeight);
+
+      return [
+        {
+          text,
+          confidence: line.confidence,
+          mergedFrom: line.mergedFrom,
+          rect: {
+            x: Math.round(rectX),
+            y: Math.round(rectY),
+            width: Math.round(
+              clamp(
+                width + paddingX * 2,
+                1,
+                preparedImage.sourceWidth - rectX,
+              ),
+            ),
+            height: Math.round(
+              clamp(
+                height + paddingY * 2,
+                1,
+                preparedImage.sourceHeight - rectY,
+              ),
+            ),
+          },
+        },
+      ];
+    })
+    .sort((left, right) => left.rect.y - right.rect.y || left.rect.x - right.rect.x)
+    .slice(0, AUTO_OCR_MAX_REGIONS);
+}
+
+async function detectFullScreenTextWithTesseract(
+  imageTarget: ImageTarget,
+  onProgress: (progress: number) => void,
+): Promise<OcrDetectedLine[]> {
+  const image = await loadImageElement(imageTarget.imageUrl);
+  const content = getImageContentSize(imageTarget);
+  const targetWidthScale = content.width > 0 ? 1080 / content.width : 1;
+  const pixelLimitScale = Math.sqrt(16_000_000 / Math.max(1, content.width * content.height));
+  const scale = Math.max(0.75, Math.min(3, targetWidthScale, pixelLimitScale));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(content.width * scale));
+  canvas.height = Math.max(1, Math.round(content.height * scale));
+
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("전체 화면 OCR 캔버스를 생성할 수 없습니다.");
+
+  context.fillStyle = "#ffffff";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = "high";
+  context.drawImage(image, 0, 0, content.width, content.height, 0, 0, canvas.width, canvas.height);
+
+  const { createWorker, OEM, PSM } = await import("tesseract.js");
+  let recognitionPass = 0;
+  const recognitionPassCount = 3;
+  const worker = await createWorker("kor+eng", OEM.LSTM_ONLY, {
+    logger: (message) => {
+      if (message.status !== "recognizing text" || typeof message.progress !== "number") return;
+      onProgress(
+        Math.round(((recognitionPass + message.progress) / recognitionPassCount) * 100),
+      );
+    },
+  });
+
+  try {
+    await worker.setParameters({
+      tessedit_pageseg_mode: PSM.SPARSE_TEXT,
+      preserve_interword_spaces: "1",
+    });
+    const recognizeCanvas = async (
+      targetCanvas: HTMLCanvasElement,
+      mergeParagraphs: boolean,
+      mergeAdjacentLines = true,
+    ) => {
+      const result = await worker.recognize(targetCanvas, {}, { blocks: true });
+      const lines: OcrDetectedLine[] = [];
+
+      for (const block of result.data.blocks ?? []) {
+        for (const paragraph of block.paragraphs ?? []) {
+          const paragraphLines: OcrDetectedLine[] = [];
+
+          for (const line of paragraph.lines ?? []) {
+            const words = (line.words ?? []).filter(
+              (word) =>
+                normalizeOcrText(word.text) &&
+                word.bbox.x1 > word.bbox.x0 &&
+                word.bbox.y1 > word.bbox.y0,
+            );
+            const readableWords = words.filter((word) =>
+              /[\p{L}\p{N}]/u.test(normalizeOcrText(word.text)),
+            );
+            const lastWord = words.at(-1);
+            const lastReadableWord = readableWords.at(-1);
+            const previousReadableWord = readableWords.at(-2);
+            const lineHeight = Math.max(1, line.bbox.y1 - line.bbox.y0);
+            const isTrailingSymbolControl =
+              Boolean(lastWord) &&
+              /^[>›»→⌄∨]$/.test(normalizeOcrText(lastWord?.text ?? ""));
+            const isTrailingCloseControl =
+              Boolean(lastReadableWord && previousReadableWord) &&
+              /^[x×✕]$/i.test(normalizeOcrText(lastReadableWord?.text ?? "")) &&
+              (lastReadableWord?.bbox.x0 ?? 0) - (previousReadableWord?.bbox.x1 ?? 0) >=
+                Math.max(4, lineHeight * 0.2);
+            const contentWords =
+              isTrailingSymbolControl || isTrailingCloseControl
+                ? words.slice(0, -1)
+                : words;
+            const textWithoutTrailingControl =
+              isTrailingSymbolControl || isTrailingCloseControl
+                ? line.text.replace(/\s*(?:[>›»→⌄∨]|[x×✕])\s*$/i, "")
+                : line.text;
+            const text = correctCommonOcrUiArtifact(textWithoutTrailingControl);
+            const confidence = Number.isFinite(line.confidence) ? Math.round(line.confidence) : 0;
+            const visibleCharacters = Array.from(text).filter((character) =>
+              /[\p{L}\p{N}]/u.test(character),
+            ).length;
+            const visibleCharacterRatio =
+              visibleCharacters / Math.max(Array.from(text).length, 1);
+            if (
+              !text ||
+              text.length > 500 ||
+              confidence < 35 ||
+              visibleCharacters < 2 ||
+              visibleCharacterRatio < 0.45
+            ) {
+              continue;
+            }
+
+            const textBounds =
+              contentWords.length > 0
+                ? {
+                    x0: Math.min(...contentWords.map((word) => word.bbox.x0)),
+                    y0: Math.min(...contentWords.map((word) => word.bbox.y0)),
+                    x1: Math.max(...contentWords.map((word) => word.bbox.x1)),
+                    y1: Math.max(...contentWords.map((word) => word.bbox.y1)),
+                  }
+                : line.bbox;
+            const x = textBounds.x0 / scale;
+            const y = textBounds.y0 / scale;
+            const width = (textBounds.x1 - textBounds.x0) / scale;
+            const height = (textBounds.y1 - textBounds.y0) / scale;
+            if (width < 3 || height < 3) continue;
+
+            const paddingX = Math.max(4, Math.min(12, height * 0.35));
+            const paddingY = Math.max(2, Math.min(8, height * 0.2));
+            const rectX = clamp(x - paddingX, 0, content.width);
+            const rectY = clamp(y - paddingY, 0, content.height);
+            const excludedRightEdge =
+              textBounds.x1 < line.bbox.x1 - Math.max(2, lineHeight * 0.08);
+            const rightPadding = excludedRightEdge ? Math.min(3, paddingX) : paddingX;
+            const rectWidth = clamp(
+              width + paddingX + rightPadding,
+              1,
+              content.width - rectX,
+            );
+            const rectHeight = clamp(height + paddingY * 2, 1, content.height - rectY);
+
+            paragraphLines.push({
+              text,
+              confidence,
+              mergedFrom: 1,
+              rect: {
+                x: Math.round(rectX),
+                y: Math.round(rectY),
+                width: Math.round(rectWidth),
+                height: Math.round(rectHeight),
+              },
+            });
+          }
+
+          lines.push(
+            ...(mergeParagraphs ? mergeOcrParagraphLines(paragraphLines) : paragraphLines),
+          );
+        }
+      }
+
+      const deduplicatedLines = deduplicateOcrLines(lines);
+      return mergeAdjacentLines
+        ? mergeAdjacentOcrLines(deduplicatedLines)
+        : deduplicatedLines;
+    };
+
+    recognitionPass = 0;
+    const primaryLines = await recognizeCanvas(canvas, true);
+    recognitionPass = 1;
+    await worker.setParameters({
+      tessedit_pageseg_mode: PSM.AUTO,
+      preserve_interword_spaces: "1",
+    });
+    const fallbackLines = (
+      await recognizeCanvas(createInvertedGrayscaleCanvas(canvas), false)
+    ).filter((line) => {
+      const normalizedText = normalizeOcrText(line.text).toLowerCase();
+      return (
+        COMMON_SHORT_UI_LABELS.has(normalizedText) ||
+        (line.confidence >= 45 && hasFlatUiBackground(canvas, line, scale))
+      );
+    });
+    recognitionPass = 2;
+    const highContrastLines = (
+      await recognizeCanvas(createInvertedHighContrastCanvas(canvas), false, false)
+    ).filter((line) => {
+      const normalizedText = normalizeOcrText(line.text).toLowerCase();
+      return (
+        COMMON_SHORT_UI_LABELS.has(normalizedText) ||
+        (line.confidence >= 45 && hasFlatUiBackground(canvas, line, scale))
+      );
+    });
+    onProgress(100);
+
+    return removeCompositeOcrDuplicates(
+      deduplicateOcrLines(
+        mergeOcrPassResults(
+          mergeOcrPassResults(primaryLines, fallbackLines),
+          highContrastLines,
+        ),
+      ),
+    )
+      .sort((left, right) => left.rect.y - right.rect.y || left.rect.x - right.rect.x)
+      .slice(0, AUTO_OCR_MAX_REGIONS);
+  } finally {
+    await worker.terminate();
+  }
+}
+
+async function detectFullScreenText(
+  imageTarget: ImageTarget,
+  onProgress: (progress: number) => void,
+  signal?: AbortSignal,
+): Promise<{
+  lines: OcrDetectedLine[];
+  provider: "google-vision" | "tesseract";
+  usage?: OcrUsageSummary;
+}> {
+  try {
+    throwIfAborted(signal);
+    onProgress(10);
+    const preparedImage = await prepareOcrImageDataUrl(imageTarget);
+    throwIfAborted(signal);
+    onProgress(35);
+    const response = await recognizeWithGoogleVision(preparedImage.dataUrl, signal);
+    throwIfAborted(signal);
+    onProgress(100);
+    const lines = mapGoogleVisionLines(preparedImage, response.lines ?? []);
+
+    if (lines.length === 0) {
+      throw new Error("Google Vision에서 인식 가능한 텍스트를 찾지 못했습니다.");
+    }
+
+    console.info("[auto-recognition] Google Vision OCR result applied.", {
+      regions: lines.length,
+    });
+    return { lines, provider: "google-vision", usage: response.usage };
+  } catch (error) {
+    if (isAbortError(error) || signal?.aborted) {
+      throw createAbortError();
+    }
+    console.warn(
+      "[auto-recognition] Google Vision OCR failed. Falling back to Tesseract.",
+      error,
+    );
+    onProgress(0);
+    const lines = await detectFullScreenTextWithTesseract(imageTarget, onProgress);
+    throwIfAborted(signal);
+    return {
+      lines,
+      provider: "tesseract",
+    };
+  }
+}
+
 function screenToForm(screen: Screen): ScreenForm {
   return {
     name: screen.name,
@@ -674,6 +1795,16 @@ function SelectChevronIcon() {
   );
 }
 
+function InformationIcon() {
+  return (
+    <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+      <circle cx="10" cy="10" r="7.5" fill="none" stroke="currentColor" strokeWidth="1.5" />
+      <path d="M10 8.75V13" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+      <circle cx="10" cy="6.25" r="1" fill="currentColor" />
+    </svg>
+  );
+}
+
 export function MultilingualTextMap() {
   const [appState, setAppState] = useState<AppState>(getInitialAppState);
   const [selectedScreenId, setSelectedScreenId] = useState<string>();
@@ -717,6 +1848,15 @@ export function MultilingualTextMap() {
   const [rowContextMenu, setRowContextMenu] = useState<RowContextMenu | null>(null);
   const [updateCandidateRegionId, setUpdateCandidateRegionId] = useState<string>();
   const [ocrByRegion, setOcrByRegion] = useState<Record<string, RegionOcrState>>({});
+  const [autoRecognition, setAutoRecognition] = useState<AutoRecognitionState>(
+    getInitialAutoRecognitionState,
+  );
+  const [autoRecognitionConfirmOpen, setAutoRecognitionConfirmOpen] = useState(false);
+  const [autoUnlinkedDeleteConfirmOpen, setAutoUnlinkedDeleteConfirmOpen] = useState(false);
+  const [ocrUsage, setOcrUsage] = useState<OcrUsageSummary>();
+  const [autoSuggestionByRegion, setAutoSuggestionByRegion] = useState<
+    Record<string, AutoRecognitionSuggestion>
+  >({});
   const [persistenceStatus, setPersistenceStatus] = useState<PersistenceStatus>({
     phase: "loading",
     message: "데이터 불러오는 중",
@@ -750,6 +1890,31 @@ export function MultilingualTextMap() {
   const openGroupsLoadedRef = useRef(false);
   const skipNextOpenGroupsSaveRef = useRef(true);
   const immediateSelectedRegionIdRef = useRef<string | undefined>(undefined);
+  const autoRecognitionRunIdRef = useRef(0);
+  const autoRecognitionAbortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    if (!AI_AUTO_RECOGNITION_ENABLED || mode !== "add") return;
+
+    let cancelled = false;
+
+    void fetch("/api/ocr/usage")
+      .then(async (response) => {
+        const body = (await response.json()) as {
+          available?: boolean;
+          usage?: OcrUsageSummary;
+        };
+        if (!response.ok || cancelled || !body.available || !body.usage) return;
+        setOcrUsage(body.usage);
+      })
+      .catch((error) => {
+        console.warn("[ocr-usage] Failed to load monthly usage.", error);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [mode]);
 
   const translationSources = appState.sources ?? (appState.source ? [appState.source] : []);
   const enabledSourceIds = useMemo(
@@ -962,6 +2127,28 @@ export function MultilingualTextMap() {
   );
 
   const activeRegions = mode === "add" ? draftRegions : editDraftRegions ?? regionsForScreen;
+  const autoUnlinkedRegions = useMemo(
+    () =>
+      activeRegions.filter(
+        (region) =>
+          mode === "add" &&
+          !region.translationItemId &&
+          autoSuggestionByRegion[region.id]?.decision === "none",
+      ),
+    [activeRegions, autoSuggestionByRegion, mode],
+  );
+  const autoUnlinkedDeletionCandidates = useMemo(
+    () =>
+      autoUnlinkedRegions.filter((region) => {
+        const hasDirectInput =
+          Object.keys(region.translationOverrides ?? {}).length > 0 ||
+          Object.keys(region.translationOverrideHistory ?? {}).length > 0 ||
+          region.memo.trim().length > 0;
+
+        return !hasDirectInput;
+      }),
+    [autoUnlinkedRegions],
+  );
   const activeRegionIndexById = useMemo(() => {
     const indexById = new Map<string, number>();
     activeRegions.forEach((region, index) => indexById.set(region.id, index));
@@ -1794,6 +2981,12 @@ export function MultilingualTextMap() {
     setTranslations((current) => current.filter((item) => item.sourceId !== sourceId));
   }
 
+  function cancelActiveAutomaticRecognition() {
+    autoRecognitionRunIdRef.current += 1;
+    autoRecognitionAbortRef.current?.abort();
+    autoRecognitionAbortRef.current = null;
+  }
+
   async function handleImageDraft(file?: File) {
     if (!file) return;
 
@@ -1804,6 +2997,7 @@ export function MultilingualTextMap() {
 
     const imageUrl = await readFileAsDataUrl(file);
     const size = await loadImageSize(imageUrl);
+    cancelActiveAutomaticRecognition();
     const previousImage = imageDraft ?? currentScreen;
     const nextCoordinateWidth = size.width;
     const nextCoordinateHeight =
@@ -1826,6 +3020,8 @@ export function MultilingualTextMap() {
     if (mode === "add") {
       setDraftRegions((regions) => regions.filter((region) => !isScreenRegion(region)));
       setEditDraftRegions(null);
+      setAutoRecognition(getInitialAutoRecognitionState());
+      setAutoSuggestionByRegion({});
     } else if (mode === "edit" && previousImage) {
       setEditDraftRegions(
         scaleRegionsToImageSize(
@@ -1886,10 +3082,38 @@ export function MultilingualTextMap() {
 
     try {
       const cropDataUrl = await cropImageRegion(imageTarget, region);
-      const { recognize } = await import("tesseract.js");
-      const result = await recognize(cropDataUrl, "kor+eng");
-      const text = result.data.text.replace(/\s+/g, " ").trim();
-      const confidence = Number.isFinite(result.data.confidence) ? Math.round(result.data.confidence) : undefined;
+      let text = "";
+      let confidence: number | undefined;
+
+      try {
+        const googleResult = await recognizeWithGoogleVision(cropDataUrl);
+        if (googleResult.usage) {
+          setOcrUsage(googleResult.usage);
+        }
+        text = normalizeOcrText(googleResult.fullText ?? "");
+        const lineConfidences = (googleResult.lines ?? [])
+          .map((line) => line.confidence)
+          .filter((value) => Number.isFinite(value));
+        confidence =
+          lineConfidences.length > 0
+            ? Math.round(
+                lineConfidences.reduce((sum, value) => sum + value, 0) /
+                  lineConfidences.length,
+              )
+            : undefined;
+      } catch (googleError) {
+        console.warn(
+          "[region-ocr] Google Vision OCR failed. Falling back to Tesseract.",
+          googleError,
+        );
+        const { recognize } = await import("tesseract.js");
+        const result = await recognize(cropDataUrl, "kor+eng");
+        text = normalizeOcrText(result.data.text);
+        confidence = Number.isFinite(result.data.confidence)
+          ? Math.round(result.data.confidence)
+          : undefined;
+      }
+
       if (!text) {
         throw new Error("OCR로 인식된 텍스트가 없습니다.");
       }
@@ -1912,7 +3136,496 @@ export function MultilingualTextMap() {
     }
   }
 
+  async function runAutomaticRecognition() {
+    if (mode !== "add" || !imageDraft || autoRecognition.phase === "ocr" || autoRecognition.phase === "ai") {
+      return;
+    }
+
+    cancelActiveAutomaticRecognition();
+    const runId = autoRecognitionRunIdRef.current;
+    const controller = new AbortController();
+    autoRecognitionAbortRef.current = controller;
+    const ensureCurrentRun = () => {
+      if (
+        controller.signal.aborted ||
+        autoRecognitionRunIdRef.current !== runId
+      ) {
+        throw createAbortError();
+      }
+    };
+
+    setSelectedRegionId(undefined);
+    closeKeyDialog();
+    setAutoSuggestionByRegion({});
+    setAutoRecognition({
+      ...getInitialAutoRecognitionState(),
+      phase: "ocr",
+      message: "화면에서 텍스트 영역을 찾는 중",
+    });
+
+    let recognizedRegions: TextRegion[] = [];
+
+    try {
+      const ocrResult = await detectFullScreenText(
+        {
+          imageUrl: imageDraft.imageUrl,
+          imageWidth: imageDraft.imageWidth,
+          imageHeight: imageDraft.imageHeight,
+          imageContentWidth: imageDraft.imageContentWidth,
+          imageContentHeight: imageDraft.imageContentHeight,
+          name: screenForm.name || imageDraft.fileName,
+        },
+        (progress) => {
+          if (autoRecognitionRunIdRef.current !== runId) return;
+          setAutoRecognition((state) => ({
+            ...state,
+            phase: "ocr",
+            progress,
+            message: `화면에서 텍스트 영역을 찾는 중 · ${progress}%`,
+          }));
+        },
+        controller.signal,
+      );
+      ensureCurrentRun();
+      const detectedLines = ocrResult.lines;
+      if (ocrResult.usage) {
+        setOcrUsage(ocrResult.usage);
+      }
+
+      if (detectedLines.length === 0) {
+        throw new Error("화면에서 인식 가능한 텍스트를 찾지 못했습니다.");
+      }
+      const ocrMergedCount = detectedLines.filter(
+        (line) => (line.mergedFrom ?? 1) > 1,
+      ).length;
+
+      const now = new Date().toISOString();
+      recognizedRegions = detectedLines.map((line) => ({
+        id: createId("region"),
+        screenId: DRAFT_SCREEN_ID,
+        visibleText: line.text,
+        ...line.rect,
+        status: "needs_check",
+        memo: "",
+        createdAt: now,
+        updatedAt: now,
+      }));
+
+      recordRegionHistory(activeRegions);
+      setDraftRegions(recognizedRegions);
+      setOcrByRegion(
+        Object.fromEntries(
+          recognizedRegions.map((region, index) => [
+            region.id,
+            {
+              status: "success" as const,
+              confidence: detectedLines[index]?.confidence,
+            },
+          ]),
+        ),
+      );
+      setAutoRecognition({
+        phase: "ai",
+        progress: 100,
+        message: `${recognizedRegions.length}개 영역의 번역 Key를 비교하는 중`,
+        detectedCount: recognizedRegions.length,
+        excludedCount: 0,
+        mergedCount: ocrMergedCount,
+        highConfidenceCount: 0,
+        lowConfidenceCount: 0,
+        unlinkedCount: recognizedRegions.length,
+        ocrProvider: ocrResult.provider,
+      });
+
+      const candidatesByRegion = new Map<
+        string,
+        ReturnType<typeof searchTranslationCandidates>
+      >();
+      const ocrConfidenceByRegion = new Map(
+        recognizedRegions.map((region, index) => [region.id, detectedLines[index]?.confidence]),
+      );
+      const requestRegions = recognizedRegions.map((region, index) => {
+        const candidates = searchTranslationCandidates(searchableTranslations, region.visibleText, 6);
+        candidatesByRegion.set(region.id, candidates);
+
+        return {
+          id: region.id,
+          label: String(index + 1),
+          text: region.visibleText,
+          ocrConfidence: detectedLines[index]?.confidence,
+          bbox: {
+            x: region.x,
+            y: region.y,
+            width: region.width,
+            height: region.height,
+          },
+          candidates: candidates.map(({ item, matchType }) => ({
+            id: item.id,
+            key: item.key,
+            matchType,
+            linkedCount: linkedTranslationUsage.get(item.id) ?? 0,
+            translations: Object.fromEntries(
+              LANGUAGE_DEFS.map((language) => [language.label, item[language.code] ?? ""]),
+            ),
+          })),
+        };
+      });
+      const imageDataUrl = await prepareAiImageDataUrl(
+        {
+          imageUrl: imageDraft.imageUrl,
+          imageWidth: imageDraft.imageWidth,
+          imageHeight: imageDraft.imageHeight,
+          imageContentWidth: imageDraft.imageContentWidth,
+          imageContentHeight: imageDraft.imageContentHeight,
+          name: screenForm.name || imageDraft.fileName,
+        },
+        recognizedRegions,
+      );
+      ensureCurrentRun();
+      const response = await fetch("/api/ai/key-suggestions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          imageDataUrl,
+          screen: {
+            name: screenForm.name,
+            group: screenForm.group,
+            baseLanguage: screenForm.baseLanguage,
+            imageWidth: imageDraft.imageContentWidth,
+            imageHeight: imageDraft.imageContentHeight,
+          },
+          regions: requestRegions,
+        }),
+        signal: controller.signal,
+      });
+      const responseBody = (await response.json()) as {
+        error?: string;
+        suggestions?: AiRegionSuggestion[];
+        textGroups?: AiTextGroupSuggestion[];
+        usage?: {
+          inputTokens?: number;
+          outputTokens?: number;
+        };
+      };
+      ensureCurrentRun();
+
+      if (!response.ok) {
+        throw new Error(responseBody.error || "AI 번역 Key 비교에 실패했습니다.");
+      }
+
+      const suggestionByRegionId = new Map(
+        (responseBody.suggestions ?? []).map((suggestion) => [suggestion.regionId, suggestion]),
+      );
+      const refinedSuggestionByRegionId = new Map<
+        string,
+        NonNullable<typeof responseBody.suggestions>[number]
+      >();
+      let totalInputTokens = responseBody.usage?.inputTokens ?? 0;
+      let totalOutputTokens = responseBody.usage?.outputTokens ?? 0;
+      const refinementRegionIds = new Set<string>();
+      const refinedRequestRegions = requestRegions.map((requestRegion, index) => {
+        const region = recognizedRegions[index];
+        const suggestion = suggestionByRegionId.get(region.id);
+        const correctedText = normalizeOcrText(suggestion?.correctedText || region.visibleText);
+        const correctedCandidates = searchTranslationCandidates(
+          searchableTranslations,
+          correctedText,
+          6,
+        );
+        const originalCandidateIds = new Set(
+          (candidatesByRegion.get(region.id) ?? []).map(({ item }) => item.id),
+        );
+        const hasNewCandidates = correctedCandidates.some(
+          ({ item }) => !originalCandidateIds.has(item.id),
+        );
+
+        if (correctedText !== region.visibleText && hasNewCandidates) {
+          refinementRegionIds.add(region.id);
+        }
+
+        return {
+          ...requestRegion,
+          text: correctedText,
+          candidates: correctedCandidates.map(({ item, matchType }) => ({
+            id: item.id,
+            key: item.key,
+            matchType,
+            linkedCount: linkedTranslationUsage.get(item.id) ?? 0,
+            translations: Object.fromEntries(
+              LANGUAGE_DEFS.map((language) => [language.label, item[language.code] ?? ""]),
+            ),
+          })),
+        };
+      });
+
+      if (refinementRegionIds.size > 0) {
+        try {
+          const refinedResponse = await fetch("/api/ai/key-suggestions", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              imageDataUrl,
+              screen: {
+                name: screenForm.name,
+                group: screenForm.group,
+                baseLanguage: screenForm.baseLanguage,
+                imageWidth: imageDraft.imageContentWidth,
+                imageHeight: imageDraft.imageContentHeight,
+              },
+              regions: refinedRequestRegions,
+            }),
+            signal: controller.signal,
+          });
+          const refinedResponseBody = (await refinedResponse.json()) as typeof responseBody;
+          ensureCurrentRun();
+
+          if (refinedResponse.ok) {
+            for (const suggestion of refinedResponseBody.suggestions ?? []) {
+              if (refinementRegionIds.has(suggestion.regionId)) {
+                refinedSuggestionByRegionId.set(suggestion.regionId, suggestion);
+              }
+            }
+            totalInputTokens += refinedResponseBody.usage?.inputTokens ?? 0;
+            totalOutputTokens += refinedResponseBody.usage?.outputTokens ?? 0;
+          } else {
+            console.warn(
+              "[ai-recognition] Corrected OCR candidate refinement failed.",
+              refinedResponseBody.error,
+            );
+          }
+        } catch (error) {
+          if (isAbortError(error) || controller.signal.aborted) {
+            throw createAbortError();
+          }
+          console.warn("[ai-recognition] Corrected OCR candidate refinement failed.", error);
+        }
+      }
+
+      const nextSuggestionState: Record<string, AutoRecognitionSuggestion> = {};
+      let highConfidenceCount = 0;
+      let lowConfidenceCount = 0;
+      let unlinkedCount = 0;
+      let excludedCount = 0;
+      const effectiveSuggestionByRegionId = new Map<string, AiRegionSuggestion>();
+
+      for (const region of recognizedRegions) {
+        const initialSuggestion = suggestionByRegionId.get(region.id);
+        const refinedSuggestion = refinedSuggestionByRegionId.get(region.id);
+        if (!initialSuggestion) continue;
+
+        effectiveSuggestionByRegionId.set(
+          region.id,
+          refinedSuggestion?.translationItemId
+            ? {
+                ...initialSuggestion,
+                ...refinedSuggestion,
+                regionType: initialSuggestion.regionType,
+                keepRegion: initialSuggestion.keepRegion,
+              }
+            : initialSuggestion,
+        );
+      }
+
+      const { groupsByRegionId, mergedCount } = buildAiTextRegionGroups(
+        recognizedRegions,
+        responseBody.textGroups ?? [],
+        effectiveSuggestionByRegionId,
+      );
+
+      const nextRegions = recognizedRegions.flatMap((region) => {
+        const suggestion = effectiveSuggestionByRegionId.get(region.id);
+        const textGroup = groupsByRegionId.get(region.id);
+        if (textGroup && textGroup.anchorId !== region.id) {
+          return [];
+        }
+        const processingRegion = textGroup
+          ? {
+              ...region,
+              ...textGroup.rect,
+              visibleText: textGroup.mergedText,
+            }
+          : region;
+        const correctedText = normalizeOcrText(
+          textGroup?.mergedText || suggestion?.correctedText || processingRegion.visibleText,
+        );
+        const originalCandidates = candidatesByRegion.get(region.id) ?? [];
+        const correctedCandidates =
+          correctedText === processingRegion.visibleText
+            ? originalCandidates
+            : searchTranslationCandidates(searchableTranslations, correctedText, 6);
+        const regionCandidates = Array.from(
+          new Map(
+            [...originalCandidates, ...correctedCandidates].map((candidate) => [
+              candidate.item.id,
+              candidate,
+            ]),
+          ).values(),
+        );
+        const preserveExcludedRegion = shouldPreserveExcludedRegion(
+          { ...processingRegion, visibleText: correctedText },
+          ocrConfidenceByRegion.get(region.id),
+          regionCandidates,
+        );
+        const isExplicitlyNonLocalizable =
+          suggestion?.regionType === "logo" ||
+          suggestion?.regionType === "status_bar" ||
+          suggestion?.regionType === "illustration_noise" ||
+          suggestion?.regionType === "icon" ||
+          suggestion?.regionType === "duplicate";
+        const isWeakOcrFragment = shouldExcludeWeakOcrFragment(
+          { ...processingRegion, visibleText: correctedText },
+          regionCandidates,
+          Number(suggestion?.confidence) || 0,
+        );
+        if (
+          isExplicitlyNonLocalizable ||
+          isWeakOcrFragment ||
+          (suggestion && !suggestion.keepRegion && !preserveExcludedRegion)
+        ) {
+          excludedCount += 1;
+          return [];
+        }
+
+        const allowedCandidateIds = new Set(
+          regionCandidates.map(({ item }) => item.id),
+        );
+        const suggestedTranslationItemId =
+          !textGroup &&
+          suggestion?.translationItemId &&
+          allowedCandidateIds.has(suggestion.translationItemId)
+            ? suggestion.translationItemId
+            : undefined;
+        const exactCorrectedCandidates = correctedCandidates.filter(({ matchType }) =>
+          matchType.endsWith("완전 일치"),
+        );
+        const correctedTranslationItemId =
+          !suggestedTranslationItemId && exactCorrectedCandidates.length === 1
+            ? exactCorrectedCandidates[0].item.id
+            : undefined;
+        const translationItemId = suggestedTranslationItemId ?? correctedTranslationItemId;
+        const confidence = clamp(Number(suggestion?.confidence) || 0, 0, 1);
+        const decision = suggestedTranslationItemId
+          ? suggestion?.decision ?? "review"
+          : correctedTranslationItemId
+            ? "review"
+            : "none";
+        const isHighConfidenceLink =
+          decision === "link" && confidence >= AUTO_LINK_CONFIDENCE_THRESHOLD;
+
+        if (isHighConfidenceLink) {
+          highConfidenceCount += 1;
+        } else if (translationItemId) {
+          lowConfidenceCount += 1;
+        } else {
+          unlinkedCount += 1;
+        }
+
+        nextSuggestionState[region.id] = {
+          decision: isHighConfidenceLink ? "link" : translationItemId ? "review" : "none",
+          confidence,
+          reason:
+            correctedTranslationItemId && !suggestedTranslationItemId
+              ? "AI 교정 문구와 번역 데이터가 완전 일치하여 검토 후보로 연결했습니다."
+              : suggestion?.reason ?? "",
+        };
+
+        return [
+          {
+            ...processingRegion,
+            visibleText: correctedText,
+            translationItemId,
+            status: "needs_check" as const,
+            updatedAt: new Date().toISOString(),
+          },
+        ];
+      });
+
+      ensureCurrentRun();
+      setDraftRegions(nextRegions);
+      setAutoSuggestionByRegion(nextSuggestionState);
+      setAutoRecognition({
+        phase: "done",
+        progress: 100,
+        message: "자동 인식 초안이 준비되었습니다.",
+        detectedCount: recognizedRegions.length,
+        excludedCount,
+        mergedCount: ocrMergedCount + mergedCount,
+        highConfidenceCount,
+        lowConfidenceCount,
+        unlinkedCount,
+        ocrProvider: ocrResult.provider,
+        inputTokens: totalInputTokens,
+        outputTokens: totalOutputTokens,
+      });
+    } catch (error) {
+      if (
+        isAbortError(error) ||
+        controller.signal.aborted ||
+        autoRecognitionRunIdRef.current !== runId
+      ) {
+        console.info("[auto-recognition] Stale recognition result ignored.");
+        return;
+      }
+      const message = error instanceof Error ? error.message : "자동 인식을 완료할 수 없습니다.";
+      console.error("[auto-recognition] Failed.", error);
+      setAutoRecognition((state) => ({
+        ...state,
+        phase: "error",
+        message:
+          recognizedRegions.length > 0
+            ? `OCR 영역은 유지했습니다. ${message}`
+            : message,
+        detectedCount: recognizedRegions.length,
+        excludedCount: 0,
+        mergedCount: 0,
+        unlinkedCount: recognizedRegions.length,
+      }));
+    } finally {
+      if (autoRecognitionRunIdRef.current === runId) {
+        autoRecognitionAbortRef.current = null;
+      }
+    }
+  }
+
+  function requestAutomaticRecognition() {
+    if (
+      draftRegions.length > 0 ||
+      autoRecognition.phase === "done" ||
+      autoRecognition.phase === "error"
+    ) {
+      setAutoRecognitionConfirmOpen(true);
+      return;
+    }
+
+    void runAutomaticRecognition();
+  }
+
+  function confirmAutomaticRecognition() {
+    setAutoRecognitionConfirmOpen(false);
+    void runAutomaticRecognition();
+  }
+
+  function confirmDeleteAutoUnlinkedRegions() {
+    const regionIds = new Set(autoUnlinkedDeletionCandidates.map((region) => region.id));
+    if (regionIds.size === 0) {
+      setAutoUnlinkedDeleteConfirmOpen(false);
+      return;
+    }
+
+    recordRegionHistory(activeRegions);
+    setDraftRegions((regions) => regions.filter((region) => !regionIds.has(region.id)));
+
+    if (selectedRegionId && regionIds.has(selectedRegionId)) {
+      setSelectedRegionId(undefined);
+      setEditingCell(null);
+      closeKeyDialog();
+    }
+
+    setAutoUnlinkedDeleteConfirmOpen(false);
+  }
+
   function openAddMode(group?: string) {
+    cancelActiveAutomaticRecognition();
     const initialForm = { ...defaultScreenForm, group: group ?? appState.groups?.[0] ?? defaultScreenForm.group };
     initialScreenFormRef.current = initialForm;
     initialEditRegionsRef.current = [];
@@ -1925,6 +3638,10 @@ export function MultilingualTextMap() {
     setEditDraftRegions(null);
     setSelectedRegionId(undefined);
     setEditingCell(null);
+    setAutoRecognition(getInitialAutoRecognitionState());
+    setAutoRecognitionConfirmOpen(false);
+    setAutoSuggestionByRegion({});
+    setOcrByRegion({});
     resetRegionHistory();
     closeKeyDialog();
   }
@@ -2023,6 +3740,7 @@ export function MultilingualTextMap() {
 
   function openEditMode() {
     if (!currentScreen) return;
+    cancelActiveAutomaticRecognition();
     const initialForm = screenToForm(currentScreen);
     const initialRegions = cloneRegions(regionsForScreen);
     initialScreenFormRef.current = initialForm;
@@ -2039,7 +3757,9 @@ export function MultilingualTextMap() {
   }
 
   function closeEditMode() {
+    cancelActiveAutomaticRecognition();
     setLeaveConfirmOpen(false);
+    setAutoRecognitionConfirmOpen(false);
     setMode("view");
     setImageDraft(null);
     setDraftRegions([]);
@@ -2047,6 +3767,8 @@ export function MultilingualTextMap() {
     setInteraction(null);
     setDraftRect(null);
     setEditingCell(null);
+    setAutoRecognition(getInitialAutoRecognitionState());
+    setAutoSuggestionByRegion({});
     resetRegionHistory();
     closeKeyDialog();
   }
@@ -2067,6 +3789,7 @@ export function MultilingualTextMap() {
     const now = new Date().toISOString();
 
     if (mode === "add") {
+      if (autoRecognition.phase === "ocr" || autoRecognition.phase === "ai") return;
       if (!imageDraft) return;
       const screenId = createId("screen");
       let uploadedImage: Awaited<ReturnType<typeof uploadScreenImage>> | undefined;
@@ -2114,6 +3837,7 @@ export function MultilingualTextMap() {
           })),
         ],
       }));
+      cancelActiveAutomaticRecognition();
       setSelectedScreenId(screen.id);
       consumeEditorHistoryEntry();
       setMode("view");
@@ -2424,6 +4148,12 @@ export function MultilingualTextMap() {
 
   function connectRegion(regionId: string, item: TranslationItem, options?: { closeDialog?: boolean }) {
     const region = activeRegions.find((candidate) => candidate.id === regionId);
+    setAutoSuggestionByRegion((state) => {
+      if (!state[regionId]) return state;
+      const nextState = { ...state };
+      delete nextState[regionId];
+      return nextState;
+    });
 
     if (region?.translationItemId === item.id) {
       const shouldUpdateVisibleText = !region.visibleText;
@@ -2473,6 +4203,14 @@ export function MultilingualTextMap() {
   }
 
   function unlinkSelectedRegion() {
+    if (selectedRegionId) {
+      setAutoSuggestionByRegion((state) => {
+        if (!state[selectedRegionId]) return state;
+        const nextState = { ...state };
+        delete nextState[selectedRegionId];
+        return nextState;
+      });
+    }
     updateSelectedRegion({
       translationItemId: undefined,
       translationOverrides: undefined,
@@ -3218,6 +4956,7 @@ export function MultilingualTextMap() {
             <tbody>
               {filteredRegions.map((region, index) => {
                 const item = region.translationItemId ? translationsById.get(region.translationItemId) : undefined;
+                const autoSuggestion = autoSuggestionByRegion[region.id];
                 const selected = region.id === selectedRegionId;
                 const activeRegionIndex = activeRegionIndexById.get(region.id) ?? -1;
                 const insertIndex = activeRegionIndex >= 0 ? activeRegionIndex : index;
@@ -3333,6 +5072,18 @@ export function MultilingualTextMap() {
                             ) : (
                               <>
                                 <span className="translation-cell-value">{displayValue || "미연결"}</span>
+                                {isEditing && language.code === "kr" && autoSuggestion ? (
+                                  <span
+                                    className={`translation-ai-tag ${autoSuggestion.decision}`}
+                                    title={autoSuggestion.reason || undefined}
+                                  >
+                                    {autoSuggestion.decision === "link"
+                                      ? "정확도 높음"
+                                      : autoSuggestion.decision === "review"
+                                        ? "정확도 낮음"
+                                        : "후보 없음"}
+                                  </span>
+                                ) : null}
                                 {language.code === "kr" && updateCandidates.length > 0 ? (
                                   <button
                                     type="button"
@@ -4158,6 +5909,92 @@ export function MultilingualTextMap() {
     );
   }
 
+  function renderAutoRecognitionConfirmDialog() {
+    if (!autoRecognitionConfirmOpen || mode !== "add") return null;
+
+    return (
+      <div
+        className="confirm-modal-backdrop"
+        role="presentation"
+        onClick={() => setAutoRecognitionConfirmOpen(false)}
+      >
+        <section
+          className="confirm-modal"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="auto-recognition-confirm-title"
+          onClick={(event) => event.stopPropagation()}
+        >
+          <h2 id="auto-recognition-confirm-title">AI 자동 인식을 다시 실행하시겠습니까?</h2>
+          <p>현재 텍스트 영역과 연결 결과가 새 자동 인식 결과로 교체됩니다.</p>
+          <div className="confirm-actions">
+            <button
+              type="button"
+              className="confirm-cancel"
+              onClick={() => setAutoRecognitionConfirmOpen(false)}
+            >
+              취소
+            </button>
+            <button
+              type="button"
+              className="confirm-primary"
+              onClick={confirmAutomaticRecognition}
+            >
+              다시 실행
+            </button>
+          </div>
+        </section>
+      </div>
+    );
+  }
+
+  function renderAutoUnlinkedDeleteConfirmDialog() {
+    if (!autoUnlinkedDeleteConfirmOpen || mode !== "add") return null;
+
+    const count = autoUnlinkedDeletionCandidates.length;
+
+    return (
+      <div
+        className="confirm-modal-backdrop"
+        role="presentation"
+        onClick={() => setAutoUnlinkedDeleteConfirmOpen(false)}
+      >
+        <section
+          className="confirm-modal"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="auto-unlinked-delete-confirm-title"
+          onClick={(event) => event.stopPropagation()}
+        >
+          <h2 id="auto-unlinked-delete-confirm-title">
+            후보 없음 {count.toLocaleString()}개를 삭제하시겠습니까?
+          </h2>
+          <p>
+            번역 Key가 연결되지 않은 AI 자동 인식 Row와 화면의 텍스트 영역 박스가 함께
+            삭제됩니다. 연결된 항목과 직접 추가·수정한 Row는 유지됩니다.
+          </p>
+          <div className="confirm-actions">
+            <button
+              type="button"
+              className="confirm-cancel"
+              onClick={() => setAutoUnlinkedDeleteConfirmOpen(false)}
+            >
+              취소
+            </button>
+            <button
+              type="button"
+              className="confirm-delete"
+              onClick={confirmDeleteAutoUnlinkedRegions}
+              disabled={count === 0}
+            >
+              삭제
+            </button>
+          </div>
+        </section>
+      </div>
+    );
+  }
+
   function renderEditorLeaveConfirmDialog() {
     if (!leaveConfirmOpen || !isEditing) return null;
 
@@ -4189,6 +6026,8 @@ export function MultilingualTextMap() {
     const isEditMode = mode === "edit";
     const hasScreenImage = Boolean(imageDraft || (isEditMode && currentScreen));
     const hasRegions = filteredRegions.length > 0;
+    const isAutoRecognitionRunning =
+      autoRecognition.phase === "ocr" || autoRecognition.phase === "ai";
 
     return (
       <section className="add-workspace">
@@ -4217,14 +6056,59 @@ export function MultilingualTextMap() {
           className={`add-screen-pane ${hasScreenImage ? "has-image" : ""}`}
         >
           {hasScreenImage ? (
-            <button
-              type="button"
-              className="add-image-replace-button"
-              onPointerDown={(event) => event.stopPropagation()}
-              onClick={() => imageFileInputRef.current?.click()}
-            >
-              교체
-            </button>
+            <div className="add-image-actions" onPointerDown={(event) => event.stopPropagation()}>
+              {!isEditMode && imageDraft && AI_AUTO_RECOGNITION_ENABLED ? (
+                <div className="add-auto-recognize-control">
+                  <button
+                    type="button"
+                    className="add-auto-recognize-button"
+                    onClick={requestAutomaticRecognition}
+                    disabled={isAutoRecognitionRunning}
+                  >
+                    <span className="add-auto-recognize-label">
+                      {autoRecognition.phase === "ocr"
+                        ? `인식 ${autoRecognition.progress}%`
+                        : autoRecognition.phase === "ai"
+                          ? "AI 연결 중"
+                          : "AI 자동 인식"}
+                    </span>
+                    <span className="add-auto-recognize-usage">
+                      {ocrUsage
+                        ? `${ocrUsage.used.toLocaleString()}/${ocrUsage.limit.toLocaleString()}`
+                        : `--/${OCR_FREE_MONTHLY_LIMIT.toLocaleString()}`}
+                    </span>
+                  </button>
+                  <span
+                    className="add-auto-recognize-info"
+                    tabIndex={0}
+                    aria-label="AI 자동 인식 안내"
+                    aria-describedby="auto-recognition-tooltip"
+                  >
+                    <InformationIcon />
+                    <span
+                      id="auto-recognition-tooltip"
+                      className="add-auto-recognize-tooltip"
+                      role="tooltip"
+                    >
+                      <strong>AI 자동 인식 안내</strong>
+                      <span>화면의 텍스트를 찾고 번역 Key 후보를 연결합니다.</span>
+                      <span>
+                        정확도 높음은 일치 가능성이 높은 후보, 정확도 낮음은 검토가 필요한
+                        후보, 후보 없음은 적절한 번역 데이터를 찾지 못한 항목입니다.
+                      </span>
+                      <span>결과는 자동 저장되지 않으며, 실행 1회당 OCR 사용량 약 1건이 발생합니다.</span>
+                    </span>
+                  </span>
+                </div>
+              ) : null}
+              <button
+                type="button"
+                className="add-image-replace-button"
+                onClick={() => imageFileInputRef.current?.click()}
+              >
+                교체
+              </button>
+            </div>
           ) : null}
           {imageDraft ? (
             renderAddScreenPreview()
@@ -4305,13 +6189,51 @@ export function MultilingualTextMap() {
               </div>
             </label>
 
-            <button type="button" className="add-save-button" onClick={saveScreen} disabled={!isEditMode && !imageDraft}>
+            <button
+              type="button"
+              className="add-save-button"
+              onClick={saveScreen}
+              disabled={(!isEditMode && !imageDraft) || isAutoRecognitionRunning}
+            >
               저장
             </button>
           </div>
 
           <div className="add-main-content">
-            <h2 className="add-results-title">연결 결과</h2>
+            <div className="add-results-head">
+              <h2 className="add-results-title">연결 결과</h2>
+              {!isEditMode && autoRecognition.phase !== "idle" ? (
+                <div
+                  className={`auto-recognition-status ${autoRecognition.phase}`}
+                  role={autoRecognition.phase === "error" ? "alert" : "status"}
+                >
+                  {autoRecognition.phase === "done" ? (
+                    <>
+                      <strong>{autoRecognition.message}</strong>
+                      <span>
+                        {autoRecognition.detectedCount}개 감지 · {autoRecognition.excludedCount}개 노이즈 제외 ·{" "}
+                        {autoRecognition.mergedCount}개 문장 병합 ·{" "}
+                        정확도 높음 {autoRecognition.highConfidenceCount}개 ·{" "}
+                        정확도 낮음 {autoRecognition.lowConfidenceCount}개 · 후보 없음{" "}
+                        {autoUnlinkedRegions.length}개
+                        {autoRecognition.ocrProvider === "tesseract" ? " · 기본 OCR 사용" : ""}
+                      </span>
+                    </>
+                  ) : (
+                    <span>{autoRecognition.message}</span>
+                  )}
+                </div>
+              ) : null}
+              {autoUnlinkedDeletionCandidates.length > 0 ? (
+                <button
+                  type="button"
+                  className="auto-unlinked-delete-button"
+                  onClick={() => setAutoUnlinkedDeleteConfirmOpen(true)}
+                >
+                  후보 없음 {autoUnlinkedDeletionCandidates.length.toLocaleString()}개 삭제
+                </button>
+              ) : null}
+            </div>
             {hasRegions ? (
               renderTranslationTable()
             ) : (
@@ -4678,6 +6600,8 @@ export function MultilingualTextMap() {
       {renderDeleteConfirmDialog()}
       {renderSaveConflictDialog()}
       {renderRegionDeleteConfirmDialog()}
+      {renderAutoRecognitionConfirmDialog()}
+      {renderAutoUnlinkedDeleteConfirmDialog()}
       {renderEditorLeaveConfirmDialog()}
     </main>
   );
