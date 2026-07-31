@@ -4773,6 +4773,7 @@ export function MultilingualTextMap() {
     }
 
     const letterboxHeight = getImageLetterboxHeight(currentScreen);
+    const previewRegions = mode === "edit" ? editDraftRegions ?? regionsForScreen : regionsForScreen;
 
     return (
       <div className="image-frame" style={{ width: isEditing ? "100%" : "360px" }}>
@@ -4784,7 +4785,7 @@ export function MultilingualTextMap() {
           </div>
         ) : null}
         <div ref={overlayRef} className="region-layer" onPointerDown={startDrawing}>
-          {regionsForScreen.filter(isScreenRegion).map((region) => {
+          {previewRegions.filter(isScreenRegion).map((region) => {
             const linked = Boolean(region.translationItemId);
             const selected = region.id === selectedRegionId;
 
