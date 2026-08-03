@@ -1,6 +1,14 @@
 "use client";
 
-import { startTransition, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
+import {
+  startTransition,
+  useDeferredValue,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent,
+} from "react";
 import {
   LANGUAGE_DEFS,
   SCREEN_GROUPS,
@@ -17,8 +25,9 @@ import {
   parseTranslationCsv,
   parseTranslationHtml,
   parseTranslationXlsx,
-  searchTranslationCandidates,
-  searchTranslationItems,
+  buildTranslationSearchIndex,
+  searchTranslationCandidatesFromIndex,
+  searchTranslationItemsFromIndex,
 } from "@/lib/translation-parser";
 import {
   getInitialAppState,
@@ -1196,7 +1205,7 @@ const COMMON_SHORT_UI_LABELS = new Set([
 function shouldPreserveExcludedRegion(
   region: TextRegion,
   confidence: number | undefined,
-  candidates: ReturnType<typeof searchTranslationCandidates>,
+  candidates: ReturnType<typeof searchTranslationCandidatesFromIndex>,
 ) {
   if ((confidence ?? 0) < 50) return false;
 
@@ -1222,7 +1231,7 @@ function shouldPreserveExcludedRegion(
 
 function shouldExcludeWeakOcrFragment(
   region: TextRegion,
-  candidates: ReturnType<typeof searchTranslationCandidates>,
+  candidates: ReturnType<typeof searchTranslationCandidatesFromIndex>,
   aiConfidence = 0,
 ) {
   const normalizedText = normalizeOcrText(region.visibleText).toLowerCase();
@@ -1827,7 +1836,6 @@ export function MultilingualTextMap() {
   const [draftRect, setDraftRect] = useState<ImageRect | null>(null);
   const [interaction, setInteraction] = useState<Interaction | null>(null);
   const [editingCell, setEditingCell] = useState<EditingCell | null>(null);
-  const [editingCellValue, setEditingCellValue] = useState("");
   const [draggedRegionId, setDraggedRegionId] = useState<string>();
   const [dragOverRegionId, setDragOverRegionId] = useState<string>();
   const [draggedMenuItem, setDraggedMenuItem] = useState<MenuDragItem | null>(null);
@@ -1892,6 +1900,7 @@ export function MultilingualTextMap() {
   const immediateSelectedRegionIdRef = useRef<string | undefined>(undefined);
   const autoRecognitionRunIdRef = useRef(0);
   const autoRecognitionAbortRef = useRef<AbortController | null>(null);
+  const editingCellValueRef = useRef("");
 
   useEffect(() => {
     if (!AI_AUTO_RECOGNITION_ENABLED || mode !== "add") return;
@@ -1938,6 +1947,10 @@ export function MultilingualTextMap() {
   const searchableTranslations = useMemo(
     () => translations.filter((item) => enabledSourceIds.has(item.sourceId)),
     [enabledSourceIds, translations],
+  );
+  const translationSearchIndex = useMemo(
+    () => buildTranslationSearchIndex(searchableTranslations),
+    [searchableTranslations],
   );
   const currentScreen = appState.screens.find((screen) => screen.id === selectedScreenId);
   const screenById = useMemo(() => {
@@ -2191,13 +2204,14 @@ export function MultilingualTextMap() {
   }, [activeRegions, statusFilter, translationsById, viewSearch]);
 
   const searchQuery = translationQuery || selectedRegion?.visibleText || "";
+  const deferredSearchQuery = useDeferredValue(searchQuery);
   const searchCandidates = useMemo(
-    () => searchTranslationCandidates(searchableTranslations, searchQuery, 35),
-    [searchQuery, searchableTranslations],
+    () => searchTranslationCandidatesFromIndex(translationSearchIndex, deferredSearchQuery, 35, false),
+    [deferredSearchQuery, translationSearchIndex],
   );
   const searchResults = useMemo(
-    () => searchTranslationItems(searchableTranslations, searchQuery, 35),
-    [searchQuery, searchableTranslations],
+    () => searchTranslationItemsFromIndex(translationSearchIndex, deferredSearchQuery, 35),
+    [deferredSearchQuery, translationSearchIndex],
   );
   function openKeyDialog(region: TextRegion, anchor: DialogAnchor) {
     if (document.activeElement instanceof HTMLElement) {
@@ -2211,7 +2225,24 @@ export function MultilingualTextMap() {
     setTranslationQuery(region.visibleText);
   }
 
+  function applyPendingKeyDialogVisibleText(regions: TextRegion[]) {
+    if (!keyDialogRegionId) return regions;
+    return regions.map((region) =>
+      region.id === keyDialogRegionId && region.visibleText !== translationQuery
+        ? { ...region, visibleText: translationQuery }
+        : region,
+    );
+  }
+
+  function commitKeyDialogVisibleText() {
+    if (!keyDialogRegionId) return;
+    const region = activeRegions.find((candidate) => candidate.id === keyDialogRegionId);
+    if (!region || region.visibleText === translationQuery) return;
+    updateRegion(keyDialogRegionId, { visibleText: translationQuery });
+  }
+
   function closeKeyDialog() {
+    commitKeyDialogVisibleText();
     cancelPendingRowKeyDialog();
     setKeyDialogRegionId(undefined);
     setKeyDialogAnchor(undefined);
@@ -3239,13 +3270,17 @@ export function MultilingualTextMap() {
 
       const candidatesByRegion = new Map<
         string,
-        ReturnType<typeof searchTranslationCandidates>
+        ReturnType<typeof searchTranslationCandidatesFromIndex>
       >();
       const ocrConfidenceByRegion = new Map(
         recognizedRegions.map((region, index) => [region.id, detectedLines[index]?.confidence]),
       );
       const requestRegions = recognizedRegions.map((region, index) => {
-        const candidates = searchTranslationCandidates(searchableTranslations, region.visibleText, 6);
+        const candidates = searchTranslationCandidatesFromIndex(
+          translationSearchIndex,
+          region.visibleText,
+          6,
+        );
         candidatesByRegion.set(region.id, candidates);
 
         return {
@@ -3327,8 +3362,8 @@ export function MultilingualTextMap() {
         const region = recognizedRegions[index];
         const suggestion = suggestionByRegionId.get(region.id);
         const correctedText = normalizeOcrText(suggestion?.correctedText || region.visibleText);
-        const correctedCandidates = searchTranslationCandidates(
-          searchableTranslations,
+        const correctedCandidates = searchTranslationCandidatesFromIndex(
+          translationSearchIndex,
           correctedText,
           6,
         );
@@ -3452,7 +3487,7 @@ export function MultilingualTextMap() {
         const correctedCandidates =
           correctedText === processingRegion.visibleText
             ? originalCandidates
-            : searchTranslationCandidates(searchableTranslations, correctedText, 6);
+            : searchTranslationCandidatesFromIndex(translationSearchIndex, correctedText, 6);
         const regionCandidates = Array.from(
           new Map(
             [...originalCandidates, ...correctedCandidates].map((candidate) => [
@@ -3825,12 +3860,13 @@ export function MultilingualTextMap() {
       };
 
       showNextSaveFeedbackRef.current = true;
+      const regionsToSave = applyPendingKeyDialogVisibleText(draftRegions);
       setAppState((state) => ({
         ...state,
         screens: [...state.screens, screen],
         regions: [
           ...state.regions,
-          ...draftRegions.map((region) => ({
+          ...regionsToSave.map((region) => ({
             ...region,
             screenId: screen.id,
             updatedAt: now,
@@ -3869,6 +3905,9 @@ export function MultilingualTextMap() {
     }
 
     showNextSaveFeedbackRef.current = true;
+    const regionsToSave = editDraftRegions
+      ? applyPendingKeyDialogVisibleText(editDraftRegions)
+      : null;
     setAppState((state) => ({
       ...state,
       screens: state.screens.map((screen) =>
@@ -3891,11 +3930,11 @@ export function MultilingualTextMap() {
             }
           : screen,
       ),
-      regions: editDraftRegions
+      regions: regionsToSave
         ? replaceScreenRegions(
             state.regions,
             currentScreen.id,
-            editDraftRegions.map((region) => ({ ...region, screenId: currentScreen.id, updatedAt: now })),
+            regionsToSave.map((region) => ({ ...region, screenId: currentScreen.id, updatedAt: now })),
           )
         : state.regions,
     }));
@@ -4563,11 +4602,11 @@ export function MultilingualTextMap() {
     if (!isEditing) return;
     const { displayValue } = getCellValue(region, item, languageCode);
     setSelectedRegionId(region.id);
+    editingCellValueRef.current = displayValue;
     setEditingCell({ regionId: region.id, languageCode });
-    setEditingCellValue(displayValue);
   }
 
-  function commitCellEdit() {
+  function commitCellEdit(nextValue = editingCellValueRef.current) {
     if (!editingCell) return;
 
     const region = activeRegions.find((candidate) => candidate.id === editingCell.regionId);
@@ -4577,7 +4616,7 @@ export function MultilingualTextMap() {
     const currentValue = Object.prototype.hasOwnProperty.call(currentOverrides, editingCell.languageCode)
       ? (currentOverrides[editingCell.languageCode] ?? "")
       : baseValue;
-    if (editingCellValue === currentValue) {
+    if (nextValue === currentValue) {
       setEditingCell(null);
       return;
     }
@@ -4596,10 +4635,10 @@ export function MultilingualTextMap() {
       [editingCell.languageCode]: nextLanguageHistory,
     };
 
-    if (editingCellValue === baseValue) {
+    if (nextValue === baseValue) {
       delete nextOverrides[editingCell.languageCode];
     } else {
-      nextOverrides[editingCell.languageCode] = editingCellValue;
+      nextOverrides[editingCell.languageCode] = nextValue;
     }
 
     recordRegionHistory(activeRegions);
@@ -4612,7 +4651,7 @@ export function MultilingualTextMap() {
 
   function cancelCellEdit() {
     setEditingCell(null);
-    setEditingCellValue("");
+    editingCellValueRef.current = "";
   }
 
   function toPointFromReactEvent(event: React.PointerEvent<HTMLElement>) {
@@ -5050,13 +5089,16 @@ export function MultilingualTextMap() {
                           >
                             {isCellEditing ? (
                               <textarea
+                                key={`${region.id}:${language.code}`}
                                 autoFocus
                                 className="translation-cell-editor"
-                                value={editingCellValue}
-                                onChange={(event) => setEditingCellValue(event.target.value)}
+                                defaultValue={editingCellValueRef.current}
+                                onChange={(event) => {
+                                  editingCellValueRef.current = event.target.value;
+                                }}
                                 onClick={(event) => event.stopPropagation()}
                                 onDoubleClick={(event) => event.stopPropagation()}
-                                onBlur={commitCellEdit}
+                                onBlur={(event) => commitCellEdit(event.currentTarget.value)}
                                 onKeyDown={(event) => {
                                   if (event.key === "Escape") {
                                     event.preventDefault();
@@ -5066,7 +5108,7 @@ export function MultilingualTextMap() {
 
                                   if (event.key === "Enter" && !event.shiftKey) {
                                     event.preventDefault();
-                                    commitCellEdit();
+                                    commitCellEdit(event.currentTarget.value);
                                   }
                                 }}
                               />
@@ -5292,11 +5334,7 @@ export function MultilingualTextMap() {
           <span aria-hidden="true" />
           <input
             value={translationQuery}
-            onChange={(event) => {
-              const text = event.target.value;
-              setTranslationQuery(text);
-              updateRegion(dialogRegion.id, { visibleText: text });
-            }}
+            onChange={(event) => setTranslationQuery(event.target.value)}
             placeholder="OCR 결과 또는 검색어 입력"
           />
         </label>

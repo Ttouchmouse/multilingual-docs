@@ -13,6 +13,19 @@ export type TranslationCandidate = {
   score: number;
 };
 
+type TranslationLanguageLabel = (typeof LANGUAGE_DEFS)[number]["label"];
+
+export type TranslationSearchEntry = {
+  item: TranslationItem;
+  key: string;
+  compactKey: string;
+  values: Array<{ label: TranslationLanguageLabel; value: string; compactValue: string }>;
+  kr: string;
+  en: string;
+  otherLanguages: Array<{ label: TranslationLanguageLabel; value: string; compactValue: string }>;
+  haystack: string;
+};
+
 const KEY_HEADERS = new Set(["키", "key", "id"]);
 const LANGUAGE_HEADER_PATTERNS: Record<LanguageCode, RegExp[]> = {
   kr: [/^korean$/, /^kr$/, /한국어?$/, /^한글$/],
@@ -69,9 +82,7 @@ function levenshteinDistance(a: string, b: string) {
   return previous[b.length];
 }
 
-function similarity(a: string, b: string) {
-  const left = compactSearchText(a);
-  const right = compactSearchText(b);
+function similarityFromCompactText(left: string, right: string) {
   const length = Math.max(left.length, right.length);
   if (length === 0) return 0;
   return 1 - levenshteinDistance(left, right) / length;
@@ -342,16 +353,47 @@ export function parseTranslationXlsx(buffer: ArrayBuffer, fileName: string) {
   return { source, items };
 }
 
-export function searchTranslationItems(items: TranslationItem[], query: string, limit = 40) {
+export function buildTranslationSearchIndex(items: TranslationItem[]): TranslationSearchEntry[] {
+  return items.map((item) => {
+    const key = normalizeSearchText(item.key);
+    const values = LANGUAGE_DEFS.map((language) => {
+      const value = normalizeSearchText(item[language.code]);
+      return {
+        label: language.label,
+        value,
+        compactValue: compactSearchText(value),
+      };
+    });
+    const kr = values.find(({ label }) => label === "KR")?.value ?? "";
+    const en = values.find(({ label }) => label === "EN")?.value ?? "";
+
+    return {
+      item,
+      key,
+      compactKey: compactSearchText(key),
+      values,
+      kr,
+      en,
+      otherLanguages: values.filter(({ label }) => label !== "KR" && label !== "EN"),
+      haystack: [item.key, ...LANGUAGE_DEFS.map((language) => item[language.code])]
+        .join("\n")
+        .toLowerCase(),
+    };
+  });
+}
+
+export function searchTranslationItemsFromIndex(
+  index: TranslationSearchEntry[],
+  query: string,
+  limit = 40,
+) {
   const needle = normalizeSearchText(query);
-  if (!needle) return items.slice(0, limit);
+  if (!needle) return index.slice(0, limit).map(({ item }) => item);
 
   const matches: TranslationItem[] = [];
-  for (const item of items) {
-    const haystack = [item.key, ...LANGUAGE_DEFS.map((language) => item[language.code])].join("\n").toLowerCase();
-
-    if (haystack.includes(needle)) {
-      matches.push(item);
+  for (const entry of index) {
+    if (entry.haystack.includes(needle)) {
+      matches.push(entry.item);
       if (matches.length >= limit) break;
     }
   }
@@ -359,13 +401,23 @@ export function searchTranslationItems(items: TranslationItem[], query: string, 
   return matches;
 }
 
-export function searchTranslationCandidates(items: TranslationItem[], query: string, limit = 40): TranslationCandidate[] {
+export function searchTranslationItems(items: TranslationItem[], query: string, limit = 40) {
+  return searchTranslationItemsFromIndex(buildTranslationSearchIndex(items), query, limit);
+}
+
+export function searchTranslationCandidatesFromIndex(
+  index: TranslationSearchEntry[],
+  query: string,
+  limit = 40,
+  includeFuzzy = true,
+): TranslationCandidate[] {
   const needle = normalizeSearchText(query);
   if (!needle) {
-    return items.slice(0, limit).map((item) => ({ item, matchType: "KR 부분 일치", score: 0 }));
+    return index.slice(0, limit).map(({ item }) => ({ item, matchType: "KR 부분 일치", score: 0 }));
   }
 
   const candidateById = new Map<string, TranslationCandidate>();
+  const fuzzyEntries: TranslationSearchEntry[] = [];
   const addCandidate = (item: TranslationItem, matchType: TranslationMatchType, score: number) => {
     const previous = candidateById.get(item.id);
     if (!previous || score > previous.score) {
@@ -373,15 +425,8 @@ export function searchTranslationCandidates(items: TranslationItem[], query: str
     }
   };
 
-  for (const item of items) {
-    const key = normalizeSearchText(item.key);
-    const values = LANGUAGE_DEFS.map((language) => ({
-      label: language.label,
-      value: normalizeSearchText(item[language.code]),
-    }));
-    const kr = values.find(({ label }) => label === "KR")?.value ?? "";
-    const en = values.find(({ label }) => label === "EN")?.value ?? "";
-    const otherLanguages = values.filter(({ label }) => label !== "KR" && label !== "EN");
+  for (const entry of index) {
+    const { item, key, values, kr, en, otherLanguages } = entry;
 
     if (kr && kr === needle) {
       addCandidate(item, "KR 완전 일치", 600);
@@ -424,13 +469,31 @@ export function searchTranslationCandidates(items: TranslationItem[], query: str
       continue;
     }
 
-    const fuzzyScore = Math.max(similarity(needle, key), ...values.map(({ value }) => similarity(needle, value)));
-    if (fuzzyScore >= 0.62) {
-      addCandidate(item, "fuzzy match", 100 + fuzzyScore);
+    if (includeFuzzy) {
+      fuzzyEntries.push(entry);
+    }
+  }
+
+  if (includeFuzzy && candidateById.size < limit) {
+    const compactNeedle = compactSearchText(needle);
+    for (const entry of fuzzyEntries) {
+      const fuzzyScore = Math.max(
+        similarityFromCompactText(compactNeedle, entry.compactKey),
+        ...entry.values.map(({ compactValue }) =>
+          similarityFromCompactText(compactNeedle, compactValue),
+        ),
+      );
+      if (fuzzyScore >= 0.62) {
+        addCandidate(entry.item, "fuzzy match", 100 + fuzzyScore);
+      }
     }
   }
 
   return Array.from(candidateById.values())
     .sort((a, b) => b.score - a.score || a.item.key.localeCompare(b.item.key))
     .slice(0, limit);
+}
+
+export function searchTranslationCandidates(items: TranslationItem[], query: string, limit = 40): TranslationCandidate[] {
+  return searchTranslationCandidatesFromIndex(buildTranslationSearchIndex(items), query, limit);
 }
