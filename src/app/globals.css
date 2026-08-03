@@ -1089,6 +1089,11 @@ label {
   color: rgba(3, 24, 50, 0.46);
 }
 
+.add-input-shell input:focus {
+  border-color: transparent;
+  box-shadow: none;
+}
+
 .add-input-shell:focus-within {
   border-color: rgba(49, 130, 246, 0.7);
   box-shadow: 0 0 0 2px #d3e8ff;
