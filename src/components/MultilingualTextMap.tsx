@@ -1836,7 +1836,7 @@ function ClearFieldIcon() {
 function SelectChevronIcon() {
   return (
     <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
-      <path d="M5 7.5L10 12.5L15 7.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M6.15 8.25H13.85C14.43 8.25 14.73 8.94 14.34 9.37L10.49 13.57C10.23 13.85 9.77 13.85 9.51 13.57L5.66 9.37C5.27 8.94 5.57 8.25 6.15 8.25Z" fill="currentColor" />
     </svg>
   );
 }
