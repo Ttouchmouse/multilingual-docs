@@ -1118,7 +1118,7 @@ label {
 }
 
 .add-save-button {
-  grid-column: 4;
+  grid-column: 5;
   align-self: start;
   width: 80px;
   height: 54px;
