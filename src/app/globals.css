@@ -991,9 +991,9 @@ label {
 .add-form-bar {
   min-height: 138px;
   display: grid;
-  grid-template-columns: 240px 240px minmax(280px, 1fr) 80px;
+  grid-template-columns: 160px 200px 240px minmax(240px, 1fr) 80px;
   align-items: start;
-  column-gap: 20px;
+  column-gap: 16px;
   padding: 20px 20px 0;
 }
 
@@ -1367,9 +1367,47 @@ label {
 
 .view-menu-head {
   display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 20px 0;
+}
+
+.view-menu-segments {
+  width: 220px;
+  display: flex;
   align-items: center;
-  height: 56px;
-  padding: 0 20px;
+  justify-content: center;
+  border-radius: 14px;
+  background: rgba(7, 25, 76, 0.05);
+  padding: 4px 5px;
+}
+
+.view-menu-segments button {
+  min-width: 0;
+  flex: 1 1 0;
+  height: 36px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: rgba(0, 19, 43, 0.58);
+  padding: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 20px;
+  text-align: center;
+  outline: 0;
+}
+
+.view-menu-segments button.active {
+  background: #ffffff;
+  color: rgba(0, 12, 30, 0.8);
+  box-shadow: 0 1px 1px rgba(0, 0, 0, 0.09);
+  font-weight: 600;
+}
+
+.view-menu-segments button:focus-visible {
+  box-shadow: 0 0 0 2px #d3e8ff;
 }
 
 .add-screen-link {

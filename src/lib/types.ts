@@ -80,10 +80,13 @@ export type TextRegion = {
   updatedAt: string;
 };
 
+export type MenuSegment = "comics" | "chat";
+
 export type AppState = {
   source?: TranslationSource;
   sources?: TranslationSource[];
   groups?: string[];
+  groupSegments?: Record<string, MenuSegment>;
   screens: Screen[];
   regions: TextRegion[];
   activeScreenId?: string;

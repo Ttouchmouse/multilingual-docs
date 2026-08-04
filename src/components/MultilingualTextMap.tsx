@@ -15,6 +15,7 @@ import {
   STATUS_LABELS,
   type AppState,
   type LanguageCode,
+  type MenuSegment,
   type Screen,
   type TextRegion,
   type TextRegionStatus,
@@ -83,6 +84,7 @@ type RowContextMenu = {
 };
 
 type ScreenForm = {
+  segment: MenuSegment;
   name: string;
   group: string;
   platform: Screen["platform"];
@@ -299,6 +301,11 @@ type PersistenceStatus = {
 
 const DRAFT_SCREEN_ID = "__draft_screen__";
 const OPEN_GROUPS_STORAGE_KEY = "tg-multilingual-docs:open-groups";
+const ACTIVE_MENU_SEGMENT_STORAGE_KEY = "tg-multilingual-docs:active-menu-segment";
+const MENU_SEGMENTS: Array<{ value: MenuSegment; label: string }> = [
+  { value: "comics", label: "Comics" },
+  { value: "chat", label: "Chat" },
+];
 const AUTO_LINK_CONFIDENCE_THRESHOLD = 0.9;
 const AUTO_OCR_MAX_REGIONS = 80;
 
@@ -317,6 +324,7 @@ function getInitialAutoRecognitionState(): AutoRecognitionState {
 }
 
 const defaultScreenForm: ScreenForm = {
+  segment: "comics",
   name: "",
   group: "payment",
   platform: "mobile_web",
@@ -468,6 +476,10 @@ function getOrderedGroupNames(state: AppState) {
   }
 
   return names;
+}
+
+function getGroupNamesForSegment(state: AppState, segment: MenuSegment) {
+  return getOrderedGroupNames(state).filter((group) => getGroupSegment(state, group) === segment);
 }
 
 function moveItemToPosition<T>(
@@ -1655,8 +1667,17 @@ async function detectFullScreenText(
   }
 }
 
-function screenToForm(screen: Screen): ScreenForm {
+function getGroupSegment(state: AppState, group: string): MenuSegment {
+  return state.groupSegments?.[group] === "chat" ? "chat" : "comics";
+}
+
+function getScreenSegment(state: AppState, screen: Screen): MenuSegment {
+  return getGroupSegment(state, getScreenGroup(screen));
+}
+
+function screenToForm(screen: Screen, segment: MenuSegment): ScreenForm {
   return {
+    segment,
     name: screen.name,
     group: screen.group,
     platform: screen.platform,
@@ -1668,6 +1689,7 @@ function screenToForm(screen: Screen): ScreenForm {
 
 function screenFormsEqual(left: ScreenForm, right: ScreenForm) {
   return (
+    left.segment === right.segment &&
     left.name === right.name &&
     left.group === right.group &&
     left.platform === right.platform &&
@@ -1772,6 +1794,21 @@ function saveStoredOpenGroups(openGroups: Record<string, boolean>) {
   }
 }
 
+function loadStoredMenuSegment(): MenuSegment {
+  if (typeof window === "undefined") return "comics";
+  return window.localStorage.getItem(ACTIVE_MENU_SEGMENT_STORAGE_KEY) === "chat" ? "chat" : "comics";
+}
+
+function saveStoredMenuSegment(segment: MenuSegment) {
+  if (typeof window === "undefined") return;
+
+  try {
+    window.localStorage.setItem(ACTIVE_MENU_SEGMENT_STORAGE_KEY, segment);
+  } catch (error) {
+    console.warn("[ui] Failed to save the active menu segment.", error);
+  }
+}
+
 function BackArrowIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
@@ -1840,6 +1877,7 @@ export function MultilingualTextMap() {
   const [dragOverRegionId, setDragOverRegionId] = useState<string>();
   const [draggedMenuItem, setDraggedMenuItem] = useState<MenuDragItem | null>(null);
   const [menuDropTarget, setMenuDropTarget] = useState<MenuDropTarget | null>(null);
+  const [activeMenuSegment, setActiveMenuSegment] = useState<MenuSegment>("comics");
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
   const [editingGroup, setEditingGroup] = useState<EditingGroup | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
@@ -1897,6 +1935,9 @@ export function MultilingualTextMap() {
   const initialEditRegionsRef = useRef<TextRegion[]>([]);
   const openGroupsLoadedRef = useRef(false);
   const skipNextOpenGroupsSaveRef = useRef(true);
+  const activeMenuSegmentLoadedRef = useRef(false);
+  const skipNextMenuSegmentSaveRef = useRef(true);
+  const lastScreenBySegmentRef = useRef<Partial<Record<MenuSegment, string>>>({});
   const immediateSelectedRegionIdRef = useRef<string | undefined>(undefined);
   const autoRecognitionRunIdRef = useRef(0);
   const autoRecognitionAbortRef = useRef<AbortController | null>(null);
@@ -1956,7 +1997,7 @@ export function MultilingualTextMap() {
   const screenById = useMemo(() => {
     return new Map(appState.screens.map((screen) => [screen.id, screen]));
   }, [appState.screens]);
-  const groupedScreens = useMemo(() => {
+  const allGroupedScreens = useMemo(() => {
     const groups = new Map<string, Screen[]>();
 
     for (const group of appState.groups ?? []) {
@@ -1970,7 +2011,11 @@ export function MultilingualTextMap() {
 
     return Array.from(groups.entries());
   }, [appState.groups, appState.screens]);
-  const groupOptions = useMemo(() => {
+  const groupedScreens = useMemo(
+    () => allGroupedScreens.filter(([group]) => getGroupSegment(appState, group) === activeMenuSegment),
+    [activeMenuSegment, allGroupedScreens, appState],
+  );
+  const allGroupOptions = useMemo(() => {
     return Array.from(
       new Set([
         ...(appState.groups ?? []),
@@ -1979,6 +2024,10 @@ export function MultilingualTextMap() {
       ].filter(Boolean)),
     );
   }, [appState.groups, appState.screens, screenForm.group]);
+  const groupOptions = useMemo(
+    () => allGroupOptions.filter((group) => getGroupSegment(appState, group) === screenForm.segment),
+    [allGroupOptions, appState, screenForm.segment],
+  );
   const isEditing = mode === "add" || mode === "edit";
   const hasScreenFormChanges = !screenFormsEqual(screenForm, initialScreenFormRef.current);
   const isEditorDirty =
@@ -2431,10 +2480,29 @@ export function MultilingualTextMap() {
   }, []);
 
   useEffect(() => {
+    activeMenuSegmentLoadedRef.current = true;
+    setActiveMenuSegment(loadStoredMenuSegment());
+  }, []);
+
+  useEffect(() => {
     if (!isLoaded) return;
-    if (selectedScreenId && appState.screens.some((screen) => screen.id === selectedScreenId)) return;
-    setSelectedScreenId(appState.screens[0]?.id);
-  }, [appState.screens, isLoaded, selectedScreenId]);
+    const selectedScreen = appState.screens.find((screen) => screen.id === selectedScreenId);
+    if (selectedScreen && getScreenSegment(appState, selectedScreen) === activeMenuSegment) return;
+
+    const rememberedScreenId = lastScreenBySegmentRef.current[activeMenuSegment];
+    const nextScreen =
+      appState.screens.find(
+        (screen) => screen.id === rememberedScreenId && getScreenSegment(appState, screen) === activeMenuSegment,
+      ) ?? appState.screens.find((screen) => getScreenSegment(appState, screen) === activeMenuSegment);
+    setSelectedScreenId(nextScreen?.id);
+    setSelectedRegionId(undefined);
+  }, [activeMenuSegment, appState, isLoaded, selectedScreenId]);
+
+  useEffect(() => {
+    const selectedScreen = appState.screens.find((screen) => screen.id === selectedScreenId);
+    if (!selectedScreen) return;
+    lastScreenBySegmentRef.current[getScreenSegment(appState, selectedScreen)] = selectedScreen.id;
+  }, [appState, selectedScreenId]);
 
   useEffect(() => {
     if (!openGroupsLoadedRef.current) return;
@@ -2444,6 +2512,15 @@ export function MultilingualTextMap() {
     }
     saveStoredOpenGroups(openGroups);
   }, [openGroups]);
+
+  useEffect(() => {
+    if (!activeMenuSegmentLoadedRef.current) return;
+    if (skipNextMenuSegmentSaveRef.current) {
+      skipNextMenuSegmentSaveRef.current = false;
+      return;
+    }
+    saveStoredMenuSegment(activeMenuSegment);
+  }, [activeMenuSegment]);
 
   useEffect(() => {
     const onPopState = () => {
@@ -3661,7 +3738,9 @@ export function MultilingualTextMap() {
 
   function openAddMode(group?: string) {
     cancelActiveAutomaticRecognition();
-    const initialForm = { ...defaultScreenForm, group: group ?? appState.groups?.[0] ?? defaultScreenForm.group };
+    const segment = group ? getGroupSegment(appState, group) : activeMenuSegment;
+    const initialGroup = group ?? getGroupNamesForSegment(appState, segment)[0] ?? "";
+    const initialForm = { ...defaultScreenForm, segment, group: initialGroup };
     initialScreenFormRef.current = initialForm;
     initialEditRegionsRef.current = [];
     pushEditorHistoryEntry();
@@ -3686,6 +3765,10 @@ export function MultilingualTextMap() {
     setAppState((state) => ({
       ...state,
       groups: [...(state.groups ?? []), nextName],
+      groupSegments: {
+        ...(state.groupSegments ?? {}),
+        [nextName]: activeMenuSegment,
+      },
     }));
     setOpenGroups((groups) => ({ ...groups, [nextName]: true }));
   }
@@ -3708,9 +3791,15 @@ export function MultilingualTextMap() {
     if (nextName === originalName) return;
 
     setAppState((state) => {
+      const nextGroupSegments = { ...(state.groupSegments ?? {}) };
+      const renamedGroupSegment = getGroupSegment(state, originalName);
+      delete nextGroupSegments[originalName];
+      nextGroupSegments[normalizedName] = renamedGroupSegment;
+
       return {
         ...state,
         groups: (state.groups ?? []).map((group) => (group === originalName ? normalizedName : group)),
+        groupSegments: nextGroupSegments,
         screens: state.screens.map((screen) =>
           getScreenGroup(screen) === originalName ? { ...screen, group: normalizedName } : screen,
         ),
@@ -3746,10 +3835,13 @@ export function MultilingualTextMap() {
           state.screens.filter((screen) => getScreenGroup(screen) === deleteTarget.name).map((screen) => screen.id),
         );
         const nextScreens = state.screens.filter((screen) => getScreenGroup(screen) !== deleteTarget.name);
+        const nextGroupSegments = { ...(state.groupSegments ?? {}) };
+        delete nextGroupSegments[deleteTarget.name];
 
         return {
           ...state,
           groups: (state.groups ?? []).filter((group) => group !== deleteTarget.name),
+          groupSegments: nextGroupSegments,
           screens: nextScreens,
           regions: state.regions.filter((region) => !deletedScreenIds.has(region.screenId)),
         };
@@ -3776,7 +3868,7 @@ export function MultilingualTextMap() {
   function openEditMode() {
     if (!currentScreen) return;
     cancelActiveAutomaticRecognition();
-    const initialForm = screenToForm(currentScreen);
+    const initialForm = screenToForm(currentScreen, getScreenSegment(appState, currentScreen));
     const initialRegions = cloneRegions(regionsForScreen);
     initialScreenFormRef.current = initialForm;
     initialEditRegionsRef.current = initialRegions;
@@ -3874,6 +3966,7 @@ export function MultilingualTextMap() {
         ],
       }));
       cancelActiveAutomaticRecognition();
+      setActiveMenuSegment(screenForm.segment);
       setSelectedScreenId(screen.id);
       consumeEditorHistoryEntry();
       setMode("view");
@@ -3938,6 +4031,7 @@ export function MultilingualTextMap() {
           )
         : state.regions,
     }));
+    setActiveMenuSegment(screenForm.segment);
     consumeEditorHistoryEntry();
     setImageDraft(null);
     setEditDraftRegions(null);
@@ -4072,13 +4166,29 @@ export function MultilingualTextMap() {
 
     setAppState((state) => {
       const groupNames = getOrderedGroupNames(state);
-      const sourceIndex = groupNames.indexOf(sourceGroup);
-      const targetIndex = groupNames.indexOf(targetGroup);
+      const segment = getGroupSegment(state, sourceGroup);
+      if (getGroupSegment(state, targetGroup) !== segment) return state;
+
+      const segmentGroupNames = groupNames.filter((group) => getGroupSegment(state, group) === segment);
+      const sourceIndex = segmentGroupNames.indexOf(sourceGroup);
+      const targetIndex = segmentGroupNames.indexOf(targetGroup);
       if (sourceIndex < 0 || targetIndex < 0) return state;
+
+      const reorderedSegmentGroups = moveItemToPosition(
+        segmentGroupNames,
+        sourceIndex,
+        targetIndex,
+        position,
+      );
+      let segmentGroupIndex = 0;
 
       return {
         ...state,
-        groups: moveItemToPosition(groupNames, sourceIndex, targetIndex, position),
+        groups: groupNames.map((group) =>
+          getGroupSegment(state, group) === segment
+            ? reorderedSegmentGroups[segmentGroupIndex++]
+            : group,
+        ),
       };
     });
   }
@@ -4503,12 +4613,32 @@ export function MultilingualTextMap() {
     }, 180);
   }
 
+  function selectViewSegment(segment: MenuSegment) {
+    if (segment === activeMenuSegment) return;
+
+    const current = appState.screens.find((screen) => screen.id === selectedScreenId);
+    if (current) {
+      lastScreenBySegmentRef.current[getScreenSegment(appState, current)] = current.id;
+    }
+
+    const rememberedScreenId = lastScreenBySegmentRef.current[segment];
+    const nextScreen =
+      appState.screens.find(
+        (screen) => screen.id === rememberedScreenId && getScreenSegment(appState, screen) === segment,
+      ) ?? appState.screens.find((screen) => getScreenSegment(appState, screen) === segment);
+
+    setActiveMenuSegment(segment);
+    setSelectedScreenId(nextScreen?.id);
+    setSelectedRegionId(undefined);
+  }
+
   function selectGlobalSearchMatch(match: GlobalSearchMatch) {
     setMode("view");
     setGlobalSearchOpen(false);
     setPendingGlobalFocusRegionId(match.region.id);
     setSelectedRegionId(match.region.id);
     setOpenGroups((groups) => ({ ...groups, [getScreenGroup(match.screen)]: true }));
+    setActiveMenuSegment(getScreenSegment(appState, match.screen));
     setSelectedScreenId(match.screen.id);
   }
 
@@ -5420,6 +5550,23 @@ export function MultilingualTextMap() {
     return (
       <aside className="view-menu">
         <div className="view-menu-head">
+          <div className="view-menu-segments" role="tablist" aria-label="서비스 영역">
+            {MENU_SEGMENTS.map((segment) => {
+              const active = activeMenuSegment === segment.value;
+              return (
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={active}
+                  className={active ? "active" : ""}
+                  key={segment.value}
+                  onClick={() => selectViewSegment(segment.value)}
+                >
+                  {segment.label}
+                </button>
+              );
+            })}
+          </div>
           <button type="button" className="add-screen-link" onClick={addGroup}>
             <span aria-hidden="true">+</span>
             그룹 추가
@@ -5588,7 +5735,7 @@ export function MultilingualTextMap() {
               </section>
             );
           })}
-          {appState.screens.length === 0 ? (
+          {groupedScreens.length === 0 ? (
             <div className="screen-list-empty">추가된 화면이 없습니다.</div>
           ) : null}
         </div>
@@ -6169,13 +6316,36 @@ export function MultilingualTextMap() {
 
         <section className="add-detail-pane">
           <div className="add-form-bar">
+            <label className="add-field add-field-segment">
+              <span>Segment</span>
+              <div className="add-select-shell">
+                <select
+                  value={screenForm.segment}
+                  onChange={(event) => {
+                    const segment = event.target.value as MenuSegment;
+                    const nextGroup = getGroupNamesForSegment(appState, segment)[0] ?? "";
+                    setScreenForm((form) => ({ ...form, segment, group: nextGroup }));
+                  }}
+                >
+                  {MENU_SEGMENTS.map((segment) => (
+                    <option key={segment.value} value={segment.value}>
+                      {segment.label}
+                    </option>
+                  ))}
+                </select>
+                <SelectChevronIcon />
+              </div>
+            </label>
+
             <label className="add-field">
               <span>그룹</span>
               <div className="add-select-shell">
                 <select
                   value={screenForm.group}
                   onChange={(event) => setScreenForm((form) => ({ ...form, group: event.target.value }))}
+                  disabled={groupOptions.length === 0}
                 >
+                  {groupOptions.length === 0 ? <option value="">그룹 없음</option> : null}
                   {groupOptions.map((group) => (
                     <option key={group} value={group}>
                       {group}
@@ -6232,7 +6402,7 @@ export function MultilingualTextMap() {
               type="button"
               className="add-save-button"
               onClick={saveScreen}
-              disabled={(!isEditMode && !imageDraft) || isAutoRecognitionRunning}
+              disabled={!screenForm.group || (!isEditMode && !imageDraft) || isAutoRecognitionRunning}
             >
               저장
             </button>
@@ -6382,7 +6552,11 @@ export function MultilingualTextMap() {
             <>
               {renderViewSidebar()}
               <section className="empty-view">
-                <strong>등록된 화면이 없습니다.</strong>
+                <strong>
+                  {appState.screens.length === 0
+                    ? "등록된 화면이 없습니다."
+                    : `${MENU_SEGMENTS.find((segment) => segment.value === activeMenuSegment)?.label}에 등록된 화면이 없습니다.`}
+                </strong>
                 <span>그룹과 화면을 추가하면 표시돼요.</span>
               </section>
             </>

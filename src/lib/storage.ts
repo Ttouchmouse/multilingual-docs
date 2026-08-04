@@ -1,4 +1,4 @@
-import type { AppState, TranslationItem, TranslationSource } from "./types";
+import type { AppState, MenuSegment, TranslationItem, TranslationSource } from "./types";
 import {
   loadSupabaseSnapshot,
   saveSupabaseSnapshot,
@@ -72,9 +72,17 @@ export function getInitialAppState(): AppState {
   return {
     sources: [],
     groups: [],
+    groupSegments: {},
     screens: [],
     regions: [],
   };
+}
+
+const LEGACY_CHAT_GROUPS = new Set(["캐릭터챗", "Characterchat", "Character Chat"]);
+
+function normalizeGroupSegment(group: string, segment: MenuSegment | undefined): MenuSegment {
+  if (segment === "chat" || segment === "comics") return segment;
+  return LEGACY_CHAT_GROUPS.has(group) ? "chat" : "comics";
 }
 
 function normalizeSource(source: TranslationSource): TranslationSource {
@@ -110,10 +118,18 @@ function normalizeAppState(appState: AppState | undefined): AppState {
     groups.add(screen.group?.trim() || "기타");
   }
 
+  const groupSegments = Object.fromEntries(
+    Array.from(groups).map((group) => [
+      group,
+      normalizeGroupSegment(group, base.groupSegments?.[group]),
+    ]),
+  );
+
   return {
     ...base,
     sources: sources.map(normalizeSource),
     groups: Array.from(groups),
+    groupSegments,
     screens: base.screens ?? [],
     regions: base.regions ?? [],
   };
