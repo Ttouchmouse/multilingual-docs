@@ -3106,7 +3106,7 @@ export function MultilingualTextMap() {
     const imageUrl = await readFileAsDataUrl(file);
     const size = await loadImageSize(imageUrl);
     cancelActiveAutomaticRecognition();
-    const previousImage = imageDraft ?? currentScreen;
+    const previousImage = mode === "add" ? imageDraft : imageDraft ?? currentScreen;
     const nextCoordinateWidth = size.width;
     const nextCoordinateHeight =
       mode === "edit" && previousImage
@@ -3126,7 +3126,17 @@ export function MultilingualTextMap() {
       fileName: file.name,
     });
     if (mode === "add") {
-      setDraftRegions((regions) => regions.filter((region) => !isScreenRegion(region)));
+      setDraftRegions((regions) =>
+        previousImage
+          ? scaleRegionsToImageSize(
+              regions,
+              previousImage.imageWidth,
+              previousImage.imageHeight,
+              nextCoordinateWidth,
+              nextCoordinateHeight,
+            )
+          : regions.filter((region) => !isScreenRegion(region)),
+      );
       setEditDraftRegions(null);
       setAutoRecognition(getInitialAutoRecognitionState());
       setAutoSuggestionByRegion({});
@@ -3142,6 +3152,7 @@ export function MultilingualTextMap() {
       );
     }
     setSelectedRegionId(undefined);
+    setOcrByRegion({});
     resetRegionHistory();
     closeKeyDialog();
     if (!screenForm.name.trim()) {
