@@ -1,0 +1,4 @@
+backups/
+.env*
+.next/
+node_modules/
